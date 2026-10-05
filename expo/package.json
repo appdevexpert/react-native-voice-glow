@@ -1,0 +1,5 @@
+{
+  "main": "../lib/expo/index.js",
+  "types": "../lib/expo/index.d.ts",
+  "react-native": "../src/expo/index.ts"
+}

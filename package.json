@@ -1,0 +1,92 @@
+{
+  "name": "react-native-voice-glow",
+  "version": "0.1.0",
+  "description": "Sound-reactive glow for React Native and Expo: a colorful beam along the bottom edge of a chat input or phone screen that rises and blooms with a voice. Skia + Reanimated, runs on the UI thread.",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "react-native": "src/index.ts",
+  "source": "src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "react-native": "./src/index.ts",
+      "default": "./lib/index.js"
+    },
+    "./expo": {
+      "types": "./lib/expo/index.d.ts",
+      "react-native": "./src/expo/index.ts",
+      "default": "./lib/expo/index.js"
+    },
+    "./audio-api": {
+      "types": "./lib/audio-api/index.d.ts",
+      "react-native": "./src/audio-api/index.ts",
+      "default": "./lib/audio-api/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "lib",
+    "expo",
+    "audio-api",
+    "LICENSE",
+    "README.md"
+  ],
+  "sideEffects": false,
+  "scripts": {
+    "build": "rm -rf lib && tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "node --test test/glow.test.mjs",
+    "render": "node scripts/render.mjs",
+    "prepack": "npm run build"
+  },
+  "peerDependencies": {
+    "@shopify/react-native-skia": ">=2.0.0",
+    "react": ">=18.0.0",
+    "react-native": ">=0.74.0",
+    "react-native-reanimated": ">=3.16.0"
+  },
+  "peerDependenciesMeta": {
+    "expo-audio": {
+      "optional": true
+    },
+    "react-native-audio-api": {
+      "optional": true
+    }
+  },
+  "keywords": [
+    "react-native",
+    "expo",
+    "skia",
+    "reanimated",
+    "voice",
+    "audio",
+    "microphone",
+    "visualizer",
+    "glow",
+    "ai",
+    "agent",
+    "siri"
+  ],
+  "license": "MIT",
+  "author": "Appeneure Technologies <satya@appeneure.com>",
+  "contributors": [
+    "Jakub Antalik (original voice-glow design and web implementation)"
+  ],
+  "devDependencies": {
+    "@shopify/react-native-skia": "^2.6.2",
+    "@types/react": "~19.2",
+    "canvaskit-wasm": "0.41.0",
+    "esbuild": "^0.28.2",
+    "expo-audio": "^57.0.5",
+    "playwright-core": "^1.63.0",
+    "pngjs": "^7.0.0",
+    "react": "^19.2.3",
+    "react-dom": "^19.2.3",
+    "react-native": "^0.86.3",
+    "react-native-audio-api": "^0.13.6",
+    "react-native-reanimated": "^4.5.1",
+    "react-native-worklets": "^0.10.1",
+    "typescript": "~5.9"
+  }
+}

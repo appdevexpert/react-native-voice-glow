@@ -1,0 +1,56 @@
+{
+  "dark-default-quiet": {
+    "level": 0.355,
+    "noiseDx": null,
+    "noiseDy": null,
+    "displace": null
+  },
+  "dark-default-speaking": {
+    "level": 0.875,
+    "noiseDx": null,
+    "noiseDy": null,
+    "displace": null
+  },
+  "dark-default-loud": {
+    "level": 1,
+    "noiseDx": null,
+    "noiseDy": null,
+    "displace": null
+  },
+  "light-default-speaking": {
+    "level": 0.922,
+    "noiseDx": null,
+    "noiseDy": null,
+    "displace": null
+  },
+  "dark-mobile-speaking": {
+    "level": 0.955,
+    "noiseDx": null,
+    "noiseDy": null,
+    "displace": null
+  },
+  "dark-pill-speaking": {
+    "level": 0.956,
+    "noiseDx": null,
+    "noiseDy": null,
+    "displace": null
+  },
+  "dark-ocean-speaking": {
+    "level": 0.922,
+    "noiseDx": null,
+    "noiseDy": null,
+    "displace": null
+  },
+  "dark-default-distortion": {
+    "level": 0.956,
+    "noiseDx": -5.043876647949219,
+    "noiseDy": -2.600008726119995,
+    "displace": 71.620361328125
+  },
+  "dark-mobile-distortion": {
+    "level": 0.955,
+    "noiseDx": 8.39625072479248,
+    "noiseDy": 2.000347375869751,
+    "displace": 89.47622680664062
+  }
+}

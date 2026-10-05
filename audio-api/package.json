@@ -1,0 +1,5 @@
+{
+  "main": "../lib/audio-api/index.js",
+  "types": "../lib/audio-api/index.d.ts",
+  "react-native": "../src/audio-api/index.ts"
+}

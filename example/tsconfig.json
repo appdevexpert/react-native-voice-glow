@@ -1,0 +1,10 @@
+{
+  "extends": "expo/tsconfig.base",
+  "compilerOptions": {
+    "strict": true,
+    "paths": {
+      "react-native-voice-glow": ["../src/index.ts"],
+      "react-native-voice-glow/*": ["../src/*/index.ts"]
+    }
+  }
+}

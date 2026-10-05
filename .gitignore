@@ -1,0 +1,12 @@
+node_modules/
+lib/
+renders/
+example/node_modules/
+example/.expo/
+example/dist/
+example/ios/
+example/android/
+*.log
+.DS_Store
+example/public/canvaskit.wasm
+example/dist-web/
