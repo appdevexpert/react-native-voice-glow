@@ -3,10 +3,10 @@
 A sound-reactive glow for React Native and Expo. A colourful beam rises from the bottom edge of a chat input or a phone screen and blooms with the level of a voice, so a voice agent feels like it is listening.
 
 <p>
-  <img src="docs/chat.webp" width="360" alt="The glow along the bottom of a chat input, rising and falling with a voice" />
+  <img src="https://raw.githubusercontent.com/appdevexpert/react-native-voice-glow/main/docs/chat.webp" width="360" alt="The glow along the bottom of a chat input, rising and falling with a voice" />
 </p>
 <p>
-  <img src="docs/phone.webp" width="300" alt="The glow filling the bottom of a phone screen as someone speaks" />
+  <img src="https://raw.githubusercontent.com/appdevexpert/react-native-voice-glow/main/docs/phone.webp" width="300" alt="The glow filling the bottom of a phone screen as someone speaks" />
 </p>
 
 It is a React Native port of [voice-glow](https://libraries.dev/voice) by [Jakub Antalik](https://github.com/Jakubantalik/Libraries.dev), drawn with [React Native Skia](https://shopify.github.io/react-native-skia/) and driven by [Reanimated](https://docs.swmansion.com/react-native-reanimated/) on the UI thread. It renders the same picture as the web original: the tuned palettes, lobe geometry, band and envelope maths are carried over, and every frame is checked against the original pixel by pixel (see [Fidelity](#fidelity)).
@@ -28,8 +28,6 @@ Add the microphone permission text to `app.json`:
   }
 }
 ```
-
-Until the first npm release, install it from GitHub instead: `npm install github:appdevexpert/react-native-voice-glow`.
 
 Bare React Native: install `@shopify/react-native-skia` and `react-native-reanimated` as their docs describe, then `react-native-voice-glow`, and either `expo-audio` or [`react-native-audio-api`](https://docs.swmansion.com/react-native-audio-api/) for the microphone.
 
@@ -168,7 +166,7 @@ Audio is analysed on the JS thread as it arrives. `VoiceAnalyser` is the Web Aud
 
 ## Fidelity
 
-<img src="docs/parity.png" width="720" alt="Pairs of renders, the original web component on the left and this library on the right, indistinguishable" />
+<img src="https://raw.githubusercontent.com/appdevexpert/react-native-voice-glow/main/docs/parity.png" width="720" alt="Pairs of renders, the original web component on the left and this library on the right, indistinguishable" />
 
 Left: the original web component in Chromium. Right: this library's engine and painter, rendered by Skia. Across the nine test scenes (dark and light, all three hosts, a different palette, the distortion on and off), the mean difference is 1 to 2.7 levels out of 255 per pixel and the 99th percentile at most 8. The live component running on React Native Web, drawn through Skia's WebGL backend, stays within 3.5 mean and 14 at the 99th percentile.
 
@@ -206,7 +204,7 @@ npx expo start
 
 It shows the glow on a phone screen, a chat input and a recording pill, with your microphone, a demo voice for the simulator, a thinking state, every palette and both themes.
 
-<img src="docs/example.png" width="720" alt="The example app: the glow on a phone screen, a chat input, a recording pill, and the light theme" />
+<img src="https://raw.githubusercontent.com/appdevexpert/react-native-voice-glow/main/docs/example.png" width="720" alt="The example app: the glow on a phone screen, a chat input, a recording pill, and the light theme" />
 
 ## Credits
 
@@ -214,4 +212,4 @@ The design, the tuning and the original web implementation are Jakub Antalik's [
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](https://github.com/appdevexpert/react-native-voice-glow/blob/main/LICENSE).
