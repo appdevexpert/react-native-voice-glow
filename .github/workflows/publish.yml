@@ -1,0 +1,74 @@
+name: Publish
+
+# Runs on every push to main (including merged pull requests). It publishes
+# only when the version in package.json is not on npm yet, so a merge that
+# does not bump the version just runs the checks. npm never accepts the same
+# version twice.
+#
+# Auth is npm trusted publishing (OIDC): no npm token is stored in GitHub.
+# The package's trusted publisher on npmjs.com must name this file
+# (publish.yml) and allow `npm publish`.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+permissions:
+  contents: write # create the GitHub release for the new version
+  id-token: write # npm trusted publishing
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+
+      - name: Check whether this version is already on npm
+        id: check
+        run: |
+          NAME=$(node -p "require('./package.json').name")
+          VERSION=$(node -p "require('./package.json').version")
+          PUBLISHED=$(npm view "$NAME@$VERSION" version 2>/dev/null || true)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          if [ "$PUBLISHED" = "$VERSION" ]; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::$NAME@$VERSION is already on npm. Bump the version in package.json to release."
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            # Pre-releases (1.2.0-beta.1) go to the "next" tag, not "latest".
+            case "$VERSION" in *-*) echo "tag=next" >> "$GITHUB_OUTPUT" ;; *) echo "tag=latest" >> "$GITHUB_OUTPUT" ;; esac
+          fi
+
+      - if: steps.check.outputs.publish == 'true'
+        run: npm ci --ignore-scripts
+
+      - if: steps.check.outputs.publish == 'true'
+        run: npm run typecheck && npm test && npm run build
+
+      - name: Use npm 11 (trusted publishing needs 11.5.1 or later)
+        if: steps.check.outputs.publish == 'true'
+        run: npm install -g npm@11 && npm --version
+
+      - name: Publish to npm
+        if: steps.check.outputs.publish == 'true'
+        run: npm publish --access public --tag ${{ steps.check.outputs.tag }}
+
+      - name: Create the GitHub release
+        if: steps.check.outputs.publish == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.check.outputs.version }}
+        run: |
+          FLAGS=""
+          case "$VERSION" in *-*) FLAGS="--prerelease" ;; esac
+          gh release create "v$VERSION" --target "$GITHUB_SHA" --title "v$VERSION" --generate-notes $FLAGS

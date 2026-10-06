@@ -206,6 +206,10 @@ It shows the glow on a phone screen, a chat input and a recording pill, with you
 
 <img src="https://raw.githubusercontent.com/appdevexpert/react-native-voice-glow/main/docs/example.png" width="720" alt="The example app: the glow on a phone screen, a chat input, a recording pill, and the light theme" />
 
+## Contributing
+
+Issues and pull requests are welcome. See [CONTRIBUTING.md](https://github.com/appdevexpert/react-native-voice-glow/blob/main/CONTRIBUTING.md) for the checks to run and how releases are cut.
+
 ## Credits
 
 The design, the tuning and the original web implementation are Jakub Antalik's [voice-glow](https://libraries.dev/voice), part of [Libraries.dev](https://libraries.dev) (MIT). This library is an independent port and is not affiliated with Libraries.dev.
