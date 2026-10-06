@@ -56,7 +56,19 @@ function Composer() {
 
 `VoiceGlow` wraps your view and draws the glow over it, clipped to its rounded corners. It reads the corner radius from the child's style, or takes `borderRadius`. Call `mic.start()` from a user action: it asks for permission the first time.
 
-`useMicrophone` from `react-native-voice-glow/expo` streams PCM from `expo-audio`. It uses only expo-audio, Skia and Reanimated, which all ship in Expo Go, so no development build is needed. `react-native-voice-glow/audio-api` has the same hook built on `react-native-audio-api` (needs a development build). On React Native Web both use the browser's microphone.
+There are two microphone hooks with the same API. On React Native Web both use the browser's microphone.
+
+- `react-native-voice-glow/expo` streams PCM from `expo-audio`. It uses only expo-audio, Skia and Reanimated, which all ship in Expo Go, so no development build is needed. On iOS, expo-audio switches the audio session to record-only while it listens, so anything else your app plays is silent until you stop; the hook hands the session back afterwards (`restoreAudioMode`).
+- `react-native-voice-glow/audio-api` is built on `react-native-audio-api` and needs a development build. It listens and plays at the same time, which is what a voice agent that talks back needs. In Expo, give its config plugin the Android permission, because its list replaces the defaults:
+
+```json
+["react-native-audio-api", {
+  "iosMicrophonePermission": "Allow $(PRODUCT_NAME) to hear your voice.",
+  "androidPermissions": ["android.permission.RECORD_AUDIO", "android.permission.MODIFY_AUDIO_SETTINGS"]
+}]
+```
+
+Microphones differ in level, so if the glow looks timid or saturates, adjust `sensitivity`.
 
 ## Driving it yourself
 
@@ -156,9 +168,9 @@ Audio is analysed on the JS thread as it arrives. `VoiceAnalyser` is the Web Aud
 
 <img src="docs/parity.png" width="720" alt="Pairs of renders, the original web component on the left and this library on the right, indistinguishable" />
 
-Left: the original web component in Chromium. Right: this library's engine and painter, rendered by Skia. Across the nine test scenes (dark and light, all three hosts, a different palette, the distortion on and off), the mean difference is 1 to 2.4 levels out of 255 per pixel and the 99th percentile at most 6. The live component running on React Native Web, drawn through Skia's WebGL backend, stays within 3.4 mean and 14 at the 99th percentile.
+Left: the original web component in Chromium. Right: this library's engine and painter, rendered by Skia. Across the nine test scenes (dark and light, all three hosts, a different palette, the distortion on and off), the mean difference is 1 to 2.7 levels out of 255 per pixel and the 99th percentile at most 8. The live component running on React Native Web, drawn through Skia's WebGL backend, stays within 3.5 mean and 14 at the 99th percentile.
 
-`npm test` runs these comparisons against the reference renders in `test/golden`, plus tests of the envelope, fades, reduced motion and the analyser. The scripts in `scripts/reference/` regenerate the references from the original source, compare the analyser with Chromium's, and check the live component on the web build of the example app.
+`npm test` runs these comparisons against the reference renders in `test/golden`, plus tests of the envelope, fades, reduced motion, the analyser and per-frame allocation. The code under test is compiled with the same Babel worklets plugin an app uses, so it is the code that runs on the UI thread. The scripts in `scripts/reference/` regenerate the references from the original source, compare the analyser with Chromium's, and check the live component on the web build of the example app.
 
 ## Accessibility
 
@@ -166,7 +178,11 @@ The glow is decorative: it takes no touches and is hidden from screen readers. W
 
 ## Performance notes
 
-Each frame is built from several offscreen layers, with Gaussian blurs on the bloom, the band and the epicentre, and a displacement map when the distortion is on. A chat input is a small area. The `mobile` type covers a large part of the screen, so on a low-end Android phone start with `distortion={0}`, which removes the two warped layers and the noise. `active={false}` stops the frame loop entirely once the fade-out finishes.
+Each frame is built from several offscreen layers, with Gaussian blurs on the bloom, the band and the epicentre, and a displacement map when the distortion is on. The layers are only as tall as the glow reaches that frame, so a quiet glow on a phone screen draws a fraction of it.
+
+Skia objects are built once and reused: react-native-skia reports each shader and image filter to the JS engine as 1 MB of native memory, so creating them every frame would keep the UI thread's garbage collector busy. After the first frame, the glow creates no shaders and at most four image filters a frame (the drifting distortion map), and none with `distortion={0}`. It draws in sRGB on every platform, as the web does.
+
+A chat input is a small area. The `mobile` type covers a large part of the screen, so on a low-end Android phone start with `distortion={0}`, which also removes two of the layers. `active={false}` stops the frame loop entirely once the fade-out finishes.
 
 This first release is verified by rendering through Skia and by running on React Native Web. It has not yet been profiled on physical iOS and Android devices; frame-time reports from real phones are very welcome.
 
@@ -175,6 +191,7 @@ This first release is verified by rendering through Skia and by running on React
 - `source` replaces `stream`, and `level` takes a shared value instead of a getter function.
 - CSS hooks (`--voice-*` variables, `className`, `css`) have no React Native equivalent; use the props.
 - `levelValue` replaces the `--vb-level` CSS variable.
+- The wrapper does not clip its children (that would cost an offscreen pass on iOS); the glow clips itself to the corner radius. Give your own view its rounded corners.
 - The unreleased dots and lines looks are not included, and neither are the web library's Pro features (the Studio and the ready-made processing state). The `motion` prop they are built on is here.
 
 ## Example app

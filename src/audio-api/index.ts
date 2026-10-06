@@ -1,12 +1,17 @@
 /**
  * Microphone input built on Software Mansion's `react-native-audio-api`,
  * for bare React Native apps or Expo apps that already use it. Needs a
- * development build (it is not in Expo Go).
+ * development build (it is not in Expo Go). Unlike the expo-audio stream,
+ * it can listen while the app is playing audio, as a voice agent does.
  *
  *   npm install react-native-audio-api
  *
- * In Expo, add its config plugin with a microphone permission:
- *   "plugins": [["react-native-audio-api", { "iosMicrophonePermission": "…" }]]
+ * In Expo, add its config plugin with the microphone permissions. The
+ * Android list replaces the plugin's defaults, so RECORD_AUDIO must be in it:
+ *   "plugins": [["react-native-audio-api", {
+ *     "iosMicrophonePermission": "…",
+ *     "androidPermissions": ["android.permission.RECORD_AUDIO", "android.permission.MODIFY_AUDIO_SETTINGS"]
+ *   }]]
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Platform } from 'react-native';
@@ -43,6 +48,8 @@ function useNativeMicrophone(options: UseMicrophoneOptions = {}): Microphone {
   const [state, setState] = useState<MicrophoneState>('idle');
   const [error, setError] = useState<Error | null>(null);
   const recorder = useRef<AudioRecorder | null>(null);
+  /** Bumped by every start and stop, so a start that was overtaken gives up. */
+  const attempt = useRef(0);
 
   const release = useCallback(() => {
     const r = recorder.current;
@@ -55,16 +62,19 @@ function useNativeMicrophone(options: UseMicrophoneOptions = {}): Microphone {
 
   const start = useCallback(async () => {
     if (recorder.current) return;
+    const id = ++attempt.current;
     setError(null);
     setState('requesting');
     try {
       if (session !== false) AudioManager.setAudioSessionOptions(session);
       const permission = await AudioManager.requestRecordingPermissions();
+      if (id !== attempt.current) return;
       if (permission !== 'Granted') {
         setState('denied');
         return;
       }
       await AudioManager.setAudioSessionActivity(true);
+      if (id !== attempt.current) return;
       const r = new AudioRecorder();
       recorder.current = r;
       const ready = r.onAudioReady({ sampleRate, bufferLength, channelCount: 1 }, ({ buffer }) => {
@@ -76,9 +86,16 @@ function useNativeMicrophone(options: UseMicrophoneOptions = {}): Microphone {
         setState('error');
       });
       const started = await r.start();
+      if (id !== attempt.current) {
+        // Stopped while starting: make sure this recorder is released.
+        if (recorder.current === r) release();
+        else r.stop().catch(() => {});
+        return;
+      }
       if (started.status === 'error') throw new Error(started.message);
       setState('live');
     } catch (e) {
+      if (id !== attempt.current) return;
       release();
       setError(e instanceof Error ? e : new Error(String(e)));
       setState('error');
@@ -86,13 +103,19 @@ function useNativeMicrophone(options: UseMicrophoneOptions = {}): Microphone {
   }, [bufferLength, release, sampleRate, session, voice]);
 
   const stop = useCallback(() => {
-    if (!recorder.current) return;
+    attempt.current++;
     release();
     voice.reset();
     setState('idle');
   }, [release, voice]);
 
-  useEffect(() => release, [release]);
+  useEffect(
+    () => () => {
+      attempt.current++;
+      release();
+    },
+    [release]
+  );
 
   return { source: voice.source, state, error, start, stop };
 }

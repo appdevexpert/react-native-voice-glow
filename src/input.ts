@@ -37,11 +37,17 @@ export function useVoiceInput(options?: VoiceAnalyserOptions): VoiceInput {
   const input = useSharedValue<VoiceInputFrame>(SILENT);
   return useMemo(() => {
     const analyser = new VoiceAnalyser(options);
+    let seq = 0;
     return {
       source: { input },
       pushPCM(samples: Float32Array, sampleRate: number) {
-        const r = analyser.process(samples, sampleRate);
-        if (r) input.value = { kind: 2, level: r.rms, low: r.low, mid: r.mid, high: r.high };
+        const batch = analyser.process(samples, sampleRate);
+        if (batch.length === 0) return;
+        const readings: number[] = [];
+        for (const r of batch) readings.push(r.rms, r.low, r.mid, r.high);
+        const last = batch[batch.length - 1];
+        seq += 1;
+        input.value = { kind: 2, level: last.rms, low: last.low, mid: last.mid, high: last.high, readings, seq };
       },
       setRms(rms: number) {
         input.value = { kind: 1, level: rms, low: 0, mid: 0, high: 0 };

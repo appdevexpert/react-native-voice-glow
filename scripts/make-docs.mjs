@@ -12,7 +12,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const outDir = resolve(root, 'renders/frames');
 mkdirSync(outDir, { recursive: true });
 
-const { resolveGlowConfig, createEngineState, createFrame, stepGlow, paintGlow } = await loadGlow();
+const { resolveGlowConfig, createEngineState, createFrame, stepGlow, paintGlow, createResources } = await loadGlow();
 const { Skia } = await loadSkia();
 
 const FPS = 30;
@@ -38,6 +38,7 @@ for (const shot of shots) {
   const state = createEngineState();
   const frame = createFrame();
   const scratch = new Array(114).fill(0);
+  const res = createResources();
   // Let it fade in and settle first.
   for (let i = 0; i < 60; i++) stepGlow(state, frame, cfg, { kind: 0, level: 0, low: 0, mid: 0, high: 0 }, null, 1 / 60, shot.w, shot.h);
   const sub = 2; // engine steps per output frame (60 Hz engine, 30 fps output)
@@ -53,7 +54,7 @@ for (const shot of shots) {
     const bg = Skia.Paint();
     bg.setColor(Skia.Color(shot.bg));
     canvas.drawRRect(Skia.RRectXY(Skia.XYWHRect(0, 0, shot.w, shot.h), shot.radius, shot.radius), bg);
-    paintGlow(Skia, canvas, cfg, frame, shot.w, shot.h, scratch);
+    paintGlow(Skia, canvas, cfg, frame, shot.w, shot.h, scratch, res);
     surface.flush();
     writeFileSync(resolve(outDir, `${shot.name}-${String(n).padStart(4, '0')}.png`), surface.makeImageSnapshot().encodeToBytes());
   }

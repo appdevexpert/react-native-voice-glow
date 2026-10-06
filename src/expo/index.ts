@@ -1,11 +1,17 @@
 /**
  * Microphone input for Expo, built on `expo-audio`'s real-time PCM stream
- * (`useAudioStream`, Expo SDK 57+). Works in Expo Go, no dev build needed.
+ * (`useAudioStream`, Expo SDK 57+). It needs no native code beyond Expo's
+ * own modules, so it runs in Expo Go.
  *
  *   npx expo install expo-audio
  *
  * Add the microphone permission text to app.json:
  *   "plugins": [["expo-audio", { "microphonePermission": "…" }]]
+ *
+ * iOS: while the stream is live, expo-audio puts the audio session in
+ * record-only mode, so nothing else the app plays is heard until it stops.
+ * For a voice agent that talks while it listens, use
+ * `react-native-voice-glow/audio-api` instead.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Platform } from 'react-native';
@@ -26,20 +32,28 @@ export interface UseMicrophoneOptions {
   /** Requested sample rate, Hz. The device may deliver another; the analyser adapts. */
   sampleRate?: number;
   /**
-   * Audio session to set before listening. The default lets recording and
-   * playback share the session (for a voice agent that also speaks), and
-   * plays in silent mode on iOS. Pass `false` to leave the session alone.
+   * The audio mode to set after listening stops. On iOS expo-audio leaves
+   * the session record-only and inactive when the stream stops, so later
+   * playback would be silent; this hands it back. Pass your app's own mode,
+   * or `false` to leave the session alone.
    */
-  audioMode?: Partial<AudioMode> | false;
+  restoreAudioMode?: Partial<AudioMode> | false;
 }
+
+const DEFAULT_RESTORE: Partial<AudioMode> = { playsInSilentMode: true, allowsRecording: false };
 
 /** The native implementation. */
 function useNativeMicrophone(options: UseMicrophoneOptions = {}): Microphone {
-  const { sampleRate = 48000, audioMode } = options;
+  const { sampleRate = 48000, restoreAudioMode = DEFAULT_RESTORE } = options;
   const voice = useVoiceInput();
   const [state, setState] = useState<MicrophoneState>('idle');
   const [error, setError] = useState<Error | null>(null);
+  /** Whether buffers are being taken. */
   const live = useRef(false);
+  /** Bumped by every start and stop, so a start that was overtaken gives up. */
+  const attempt = useRef(0);
+  const restore = useRef(restoreAudioMode);
+  restore.current = restoreAudioMode;
 
   const onBuffer = useCallback(
     (buffer: AudioStreamBuffer) => {
@@ -52,53 +66,58 @@ function useNativeMicrophone(options: UseMicrophoneOptions = {}): Microphone {
 
   const { stream } = useAudioStream({ sampleRate, channels: 1, encoding: 'float32', onBuffer });
 
-  const start = useCallback(async () => {
-    if (live.current) return;
-    setError(null);
-    setState('requesting');
-    try {
-      const permission = await requestRecordingPermissionsAsync();
-      if (!permission.granted) {
-        setState('denied');
-        return;
-      }
-      if (audioMode !== false) {
-        await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true, ...audioMode });
-      }
-      live.current = true;
-      await stream.start();
-      setState('live');
-    } catch (e) {
-      live.current = false;
-      setError(e instanceof Error ? e : new Error(String(e)));
-      setState('error');
-    }
-  }, [audioMode, stream]);
-
-  const stop = useCallback(() => {
-    if (!live.current) return;
+  const halt = useCallback(() => {
+    const wasLive = live.current;
     live.current = false;
     try {
       stream.stop();
     } catch {
       // Already stopped.
     }
+    if (wasLive && restore.current !== false) setAudioModeAsync(restore.current).catch(() => {});
+  }, [stream]);
+
+  const start = useCallback(async () => {
+    if (live.current) return;
+    const id = ++attempt.current;
+    setError(null);
+    setState('requesting');
+    try {
+      const permission = await requestRecordingPermissionsAsync();
+      if (id !== attempt.current) return;
+      if (!permission.granted) {
+        setState('denied');
+        return;
+      }
+      live.current = true;
+      await stream.start();
+      if (id !== attempt.current) {
+        // Stopped while starting.
+        halt();
+        return;
+      }
+      setState('live');
+    } catch (e) {
+      if (id !== attempt.current) return;
+      halt();
+      setError(e instanceof Error ? e : new Error(String(e)));
+      setState('error');
+    }
+  }, [halt, stream]);
+
+  const stop = useCallback(() => {
+    attempt.current++;
+    halt();
     voice.reset();
     setState('idle');
-  }, [stream, voice]);
+  }, [halt, voice]);
 
   useEffect(
     () => () => {
-      if (live.current) {
-        live.current = false;
-        try {
-          stream.stop();
-        } catch {
-          // Already released.
-        }
-      }
+      attempt.current++;
+      if (live.current) halt();
     },
-    [stream]
+    [halt]
   );
 
   return { source: voice.source, state, error, start, stop };

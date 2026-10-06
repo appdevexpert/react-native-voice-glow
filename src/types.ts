@@ -23,6 +23,15 @@ export interface VoiceInputFrame {
   low: number;
   mid: number;
   high: number;
+  /**
+   * Optional: several analyses from one audio buffer, oldest first, as
+   * [level, low, mid, high, level, low, …], spaced 1/60 s of audio apart.
+   * The glow plays them back one per frame, so a platform that delivers
+   * audio in 100 ms buffers still moves at 60 Hz. `seq` changes with each
+   * new batch.
+   */
+  readings?: number[];
+  seq?: number;
 }
 
 /** A live audio source for `<VoiceGlow source={…}>`. */

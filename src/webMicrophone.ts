@@ -17,6 +17,8 @@ export function useWebMicrophone(): Microphone {
   const [state, setState] = useState<MicrophoneState>('idle');
   const [error, setError] = useState<Error | null>(null);
   const live = useRef<{ stream: MediaStream; ctx: AudioContext; raf: number } | null>(null);
+  /** Bumped by every start and stop, so a start that was overtaken gives up. */
+  const attempt = useRef(0);
 
   const release = useCallback(() => {
     const l = live.current;
@@ -29,6 +31,7 @@ export function useWebMicrophone(): Microphone {
 
   const start = useCallback(async () => {
     if (live.current) return;
+    const id = ++attempt.current;
     const g = globalThis as unknown as {
       navigator?: { mediaDevices?: MediaDevices };
       AudioContext?: typeof AudioContext;
@@ -46,8 +49,17 @@ export function useWebMicrophone(): Microphone {
       const stream = await g.navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
       });
+      if (id !== attempt.current) {
+        stream.getTracks().forEach((t) => t.stop());
+        return;
+      }
       const ctx = new Ctor();
       if (ctx.state === 'suspended') await ctx.resume();
+      if (id !== attempt.current) {
+        stream.getTracks().forEach((t) => t.stop());
+        ctx.close().catch(() => {});
+        return;
+      }
       const analyser = ctx.createAnalyser();
       analyser.fftSize = 1024;
       analyser.smoothingTimeConstant = 0.5;
@@ -81,6 +93,7 @@ export function useWebMicrophone(): Microphone {
       live.current = { stream, ctx, raf: requestAnimationFrame(read) };
       setState('live');
     } catch (e) {
+      if (id !== attempt.current) return;
       release();
       const err = e instanceof Error ? e : new Error(String(e));
       setError(err);
@@ -89,7 +102,7 @@ export function useWebMicrophone(): Microphone {
   }, [release, voice]);
 
   const stop = useCallback(() => {
-    if (!live.current) return;
+    attempt.current++;
     release();
     voice.reset();
     setState('idle');

@@ -13,7 +13,6 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import * as esbuild from 'esbuild';
 import { DPR, SETTLE_SECONDS } from './scenes.mjs';
 const { scenes } = await import(process.env.SCENES ? new URL(process.env.SCENES, 'file://' + process.cwd() + '/').href : './scenes.mjs');
 
@@ -23,26 +22,37 @@ const root = resolve(here, '..');
 const outDir = resolve(process.argv[2] ?? resolve(root, 'renders/native'));
 mkdirSync(outDir, { recursive: true });
 
-/** Bundle the library's engine and painter for Node. */
+/**
+ * Load the library's engine and painter for Node, compiled the way an app
+ * compiles them: TypeScript through Babel with the worklets plugin, which
+ * turns every worklet into a factory that captures what it uses. Loading
+ * the result catches worklet-ordering mistakes (a worklet used before it is
+ * defined throws at module load on a device), and every render below runs
+ * the transformed code.
+ */
 export async function loadGlow() {
-  const result = await esbuild.build({
-    stdin: {
-      contents: `
-        export { resolveGlowConfig } from './src/config';
-        export { createEngineState, createFrame, stepGlow } from './src/engine';
-        export { paintGlow } from './src/painter';
-      `,
-      resolveDir: root,
-      loader: 'ts',
-    },
-    bundle: true,
-    write: false,
-    format: 'cjs',
-    platform: 'node',
-  });
-  const mod = { exports: {} };
-  new Function('module', 'exports', 'require', result.outputFiles[0].text)(mod, mod.exports, require);
-  return mod.exports;
+  const babel = require('@babel/core');
+  const cache = new Map();
+  const load = (file) => {
+    if (cache.has(file)) return cache.get(file).exports;
+    const { code } = babel.transformSync(readFileSync(file, 'utf8'), {
+      filename: file,
+      babelrc: false,
+      configFile: false,
+      presets: [require.resolve('@babel/preset-typescript')],
+      plugins: [require.resolve('react-native-worklets/plugin'), require.resolve('@babel/plugin-transform-modules-commonjs')],
+    });
+    const mod = { exports: {} };
+    cache.set(file, mod);
+    const localRequire = (id) => (id.startsWith('.') ? load(resolve(dirname(file), id.endsWith('.ts') ? id : `${id}.ts`)) : require(id));
+    new Function('module', 'exports', 'require', code)(mod, mod.exports, localRequire);
+    return mod.exports;
+  };
+  const src = (name) => load(resolve(root, 'src', name));
+  const { resolveGlowConfig } = src('config.ts');
+  const { createEngineState, createFrame, stepGlow } = src('engine.ts');
+  const { paintGlow, createResources } = src('painter.ts');
+  return { resolveGlowConfig, createEngineState, createFrame, stepGlow, paintGlow, createResources };
 }
 
 /** react-native-skia's API, backed by CanvasKit. */
@@ -59,7 +69,7 @@ function hexColor(Skia, hex) {
 
 /** Render one scene after `seconds` of a constant level. */
 export function renderScene(glow, Skia, scene, seconds = SETTLE_SECONDS, dpr = DPR, pin = null) {
-  const { resolveGlowConfig, createEngineState, createFrame, stepGlow, paintGlow } = glow;
+  const { resolveGlowConfig, createEngineState, createFrame, stepGlow, paintGlow, createResources } = glow;
   const theme = scene.props.theme === 'light' ? 'light' : 'dark';
   const cfg = resolveGlowConfig(scene.props, { theme, reducedMotion: false, radius: scene.radius, version: 1 });
   const state = createEngineState();
@@ -83,7 +93,7 @@ export function renderScene(glow, Skia, scene, seconds = SETTLE_SECONDS, dpr = D
   canvas.drawRRect(Skia.RRectXY(Skia.XYWHRect(0, 0, scene.w, scene.h), scene.radius, scene.radius), bg);
   const scratch = new Array(2 * 57).fill(0);
   const t0 = performance.now();
-  paintGlow(Skia, canvas, cfg, frame, scene.w, scene.h, scratch);
+  paintGlow(Skia, canvas, cfg, frame, scene.w, scene.h, scratch, createResources());
   surface.flush();
   const paintMs = performance.now() - t0;
   const png = surface.makeImageSnapshot().encodeToBytes();

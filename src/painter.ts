@@ -14,13 +14,27 @@
  *   5. epicentre: a white wash under the band (light theme)
  *
  * Every visual layer follows the CSS pipeline it stands in for: content,
- * then the filter (blur, hue-rotate, brightness, saturate, displacement),
+ * then the filter (blur, displacement, hue-rotate, brightness, saturate),
  * then the clip, then the mask, then the opacity.
+ *
+ * Allocation: react-native-skia reports every shader and image filter to
+ * the JS engine as 1 MB of native memory, so building them per frame drives
+ * the UI thread's garbage collector hard. Everything that depends only on
+ * the config or the size is built once into `GlowResources` and reused:
+ * gradients are made at unit size and placed with canvas transforms, blurs
+ * are cached, and the per-frame colour drift goes on the layer paint as a
+ * (cheap) colour filter. Only the distortion's drifting map (four image
+ * filters) is rebuilt each frame; no shader is.
+ *
+ * Order matters in this file: the worklets Babel plugin turns each worklet
+ * function into a constant that captures what it calls when it is defined,
+ * so a worklet must be declared after every worklet it uses.
  */
 import type {
   SkCanvas,
   SkColorFilter,
   SkImageFilter,
+  SkPaint,
   SkPath,
   SkShader,
   Skia as SkiaValue,
@@ -52,6 +66,78 @@ type SkiaApi = typeof SkiaValue;
 const BAND_RAMP_W = [1, 0.72, 0.46, 0.22];
 const BAND_RAMP_A = [0.16, 0.2, 0.26, 0.34];
 
+/** Lobe layers, in the order of the cached shaders. */
+const LAYER_STROKE = 0;
+const LAYER_INNER = 1;
+const LAYER_BLOOM = 2;
+
+/**
+ * The web component rasters its warp layers at half size and scales them
+ * back up, and its SVG filter works in that half-size space, so on screen
+ * the noise is twice as coarse and the displacement and drift twice as
+ * large as the numbers say. That is the look people see, so it is the look
+ * reproduced here, at full resolution.
+ */
+const WARP_SPACE = 2;
+
+/** Everything the painter can build once per config (and size) and reuse every frame. */
+export interface GlowResources {
+  version: number;
+  w: number;
+  h: number;
+  lobes: (SkShader | null)[];
+  highlight: SkShader | null;
+  maskInner: SkShader | null;
+  maskStroke: SkShader | null;
+  maskBloom: SkShader | null;
+  core: SkShader | null;
+  coreExtent: number;
+  frameV: SkShader | null;
+  frameH: SkShader | null;
+  rim: SkPath | null;
+  bloomBlur: SkImageFilter | null;
+  bandBlur: SkImageFilter | null;
+  haloBlur: SkImageFilter | null;
+  coreBlur: SkImageFilter | null;
+  noise: SkImageFilter | null;
+  noiseColor: SkColorFilter | null;
+  /** The band's end fades, at unit width, placed on its span each frame. */
+  bandFade: SkShader | null;
+  /** The colour drift's filter, keyed by its hue. */
+  colorFilter: SkColorFilter | null;
+  colorHue: number;
+  colorVersion: number;
+}
+
+export function createResources(): GlowResources {
+  'worklet';
+  return {
+    version: -1,
+    w: -1,
+    h: -1,
+    lobes: [],
+    highlight: null,
+    maskInner: null,
+    maskStroke: null,
+    maskBloom: null,
+    core: null,
+    coreExtent: 0,
+    frameV: null,
+    frameH: null,
+    rim: null,
+    bloomBlur: null,
+    bandBlur: null,
+    haloBlur: null,
+    coreBlur: null,
+    noise: null,
+    noiseColor: null,
+    bandFade: null,
+    colorFilter: null,
+    colorHue: NaN,
+    colorVersion: -1,
+  };
+}
+
 function rgba(c: RGB, a: number): Float32Array {
   'worklet';
   return Float32Array.of(c[0] / 255, c[1] / 255, c[2] / 255, a);
@@ -68,12 +154,18 @@ function px1(v: number): number {
   return Math.round(v * 10) / 10;
 }
 
-// ── Colour filters: the CSS filter functions as Skia colour matrices ─────
-
-function matrixFilter(Sk: SkiaApi, m: number[]): SkColorFilter {
+function rect(x: number, y: number, width: number, height: number) {
   'worklet';
-  return Sk.ColorFilter.MakeMatrix(m);
+  return { x, y, width, height };
 }
+
+function rrect(x: number, y: number, w: number, h: number, r: number) {
+  'worklet';
+  const rr = Math.max(0, Math.min(r, w / 2, h / 2));
+  return { rect: rect(x, y, w, h), rx: rr, ry: rr };
+}
+
+// ── Colour filters: the CSS filter functions as Skia colour matrices ─────
 
 /** hue-rotate(deg) brightness(b) saturate(s), chained in CSS order. */
 export function cssColorFilter(Sk: SkiaApi, deg: number, b: number, s: number): SkColorFilter {
@@ -81,14 +173,14 @@ export function cssColorFilter(Sk: SkiaApi, deg: number, b: number, s: number): 
   const r = (deg * Math.PI) / 180;
   const c = Math.cos(r);
   const n = Math.sin(r);
-  const hue = matrixFilter(Sk, [
+  const hue = Sk.ColorFilter.MakeMatrix([
     0.213 + c * 0.787 - n * 0.213, 0.715 - c * 0.715 - n * 0.715, 0.072 - c * 0.072 + n * 0.928, 0, 0,
     0.213 - c * 0.213 + n * 0.143, 0.715 + c * 0.285 + n * 0.14, 0.072 - c * 0.072 - n * 0.283, 0, 0,
     0.213 - c * 0.213 - n * 0.787, 0.715 - c * 0.715 + n * 0.715, 0.072 + c * 0.928 + n * 0.072, 0, 0,
     0, 0, 0, 1, 0,
   ]);
-  const bright = matrixFilter(Sk, [b, 0, 0, 0, 0, 0, b, 0, 0, 0, 0, 0, b, 0, 0, 0, 0, 0, 1, 0]);
-  const sat = matrixFilter(Sk, [
+  const bright = Sk.ColorFilter.MakeMatrix([b, 0, 0, 0, 0, 0, b, 0, 0, 0, 0, 0, b, 0, 0, 0, 0, 0, 1, 0]);
+  const sat = Sk.ColorFilter.MakeMatrix([
     0.213 + 0.787 * s, 0.715 - 0.715 * s, 0.072 - 0.072 * s, 0, 0,
     0.213 - 0.213 * s, 0.715 + 0.285 * s, 0.072 - 0.072 * s, 0, 0,
     0.213 - 0.213 * s, 0.715 - 0.715 * s, 0.072 + 0.928 * s, 0, 0,
@@ -97,23 +189,7 @@ export function cssColorFilter(Sk: SkiaApi, deg: number, b: number, s: number): 
   return Sk.ColorFilter.MakeCompose(sat, Sk.ColorFilter.MakeCompose(bright, hue));
 }
 
-// ── Shapes and shaders ──────────────────────────────────────────────────
-
-/** An elliptical radial gradient: CSS `radial-gradient(ellipse rx ry at cx cy, …)`. */
-function ellipseShader(
-  Sk: SkiaApi,
-  cx: number,
-  cy: number,
-  rx: number,
-  ry: number,
-  colors: Float32Array[],
-  pos: number[]
-): SkShader {
-  'worklet';
-  const k = ry / rx;
-  const local = Sk.Matrix([1, 0, 0, 0, k, cy - k * cy, 0, 0, 1]);
-  return Sk.Shader.MakeRadialGradient({ x: cx, y: cy }, rx, colors, pos, TILE_CLAMP, local, GRADIENT_PREMUL);
-}
+// ── Paths ───────────────────────────────────────────────────────────────
 
 /** A path builder that works on both the immutable-path (PathBuilder) and older mutable-path APIs. */
 function pathBuilder(Sk: SkiaApi): any {
@@ -159,11 +235,127 @@ function abovePath(Sk: SkiaApi, pts: number[], cw: number, ch: number): SkPath {
   return finishPath(b);
 }
 
-function rrect(Sk: SkiaApi, x: number, y: number, w: number, h: number, r: number) {
+// ── Building the cached resources ───────────────────────────────────────
+
+/** A radial gradient on the unit circle, to be placed with translate + scale. */
+function unitRadial(Sk: SkiaApi, colors: Float32Array[], pos: number[]): SkShader {
   'worklet';
-  const rr = Math.max(0, Math.min(r, w / 2, h / 2));
-  return Sk.RRectXY(Sk.XYWHRect(x, y, w, h), rr, rr);
+  return Sk.Shader.MakeRadialGradient({ x: 0, y: 0 }, 1, colors, pos, TILE_CLAMP, undefined, GRADIENT_PREMUL);
 }
+
+function unitMask(Sk: SkiaApi, mid: number, tail: number): SkShader {
+  'worklet';
+  return tail > 0
+    ? unitRadial(Sk, [white(1), white(0.5), white(tail), white(0)], [0, mid / 100, 0.85, 1])
+    : unitRadial(Sk, [white(1), white(0.5), white(0)], [0, mid / 100, 1]);
+}
+
+/** Build (or refresh) everything that depends only on the config and the size. */
+export function prepareResources(Sk: SkiaApi, r: GlowResources, cfg: GlowConfig, cw: number, ch: number): void {
+  'worklet';
+  const configChanged = r.version !== cfg.version;
+  const sizeChanged = r.w !== cw || r.h !== ch;
+  if (!configChanged && !sizeChanged) return;
+
+  if (configChanged) {
+    const lobes: (SkShader | null)[] = [];
+    const strokeStop = cfg.fade / 100;
+    const bloomStop = Math.min(95, cfg.fade + 2) / 100;
+    for (let layer = 0; layer < 3; layer++) {
+      const alpha = layer === LAYER_STROKE ? 1 : layer === LAYER_INNER ? 0.46 : cfg.dark ? 0.9 : 0.7;
+      const stop = layer === LAYER_BLOOM ? bloomStop : strokeStop;
+      for (let i = 0; i < LOBE_COUNT; i++) {
+        const c = cfg.colors[i];
+        lobes.push(unitRadial(Sk, [rgba(c, alpha), rgba(c, 0)], [0, stop]));
+      }
+    }
+    r.lobes = lobes;
+    r.highlight = cfg.dark
+      ? unitRadial(Sk, [white(0.45), white(0.14), white(0)], [0, 0.3, 0.65])
+      : unitRadial(
+          Sk,
+          [Float32Array.of(0, 0, 0, 0.55), Float32Array.of(0, 0, 0, 0.22), Float32Array.of(0, 0, 0, 0)],
+          [0, 0.35, 0.7]
+        );
+    r.maskInner = unitMask(Sk, 45, 0.3);
+    r.maskStroke = unitMask(Sk, 45, 0);
+    r.maskBloom = unitMask(Sk, 35, 0);
+
+    if (cfg.coreLight > 0) {
+      const boost = Math.max(0, Math.min(2, cfg.coreLight - 1));
+      const b1 = Math.min(1, boost);
+      const b2 = Math.max(0, boost - 1);
+      const solid = px1(45 * b1 + 27 * b2) / 100;
+      const midStop = px1(40 + 25 * b1 + 15 * b2) / 100;
+      const midAlpha = Math.min(1, 0.55 + 0.35 * b1 + 0.1 * b2);
+      const endStop = px1(72 + 14 * b1 + 8 * b2) / 100;
+      r.core = unitRadial(Sk, [white(1), white(1), white(midAlpha), white(0)], [0, solid, midStop, endStop]);
+      r.coreExtent = endStop;
+      r.coreBlur = Sk.ImageFilter.MakeBlur(cfg.coreBlur, cfg.coreBlur, TILE_DECAL, null, null);
+    } else {
+      r.core = null;
+      r.coreBlur = null;
+    }
+
+    r.bloomBlur = Sk.ImageFilter.MakeBlur(cfg.bloomBlur, cfg.bloomBlur, TILE_DECAL, null, null);
+    const fade = cfg.bandTail > 0 ? 0.015 : 0.18;
+    r.bandFade = Sk.Shader.MakeLinearGradient(
+      { x: 0, y: 0 },
+      { x: 1, y: 0 },
+      [white(0), white(1), white(1), white(0)],
+      [0, fade, 1 - fade, 1],
+      TILE_CLAMP
+    );
+    const blurPx = (3.5 * cfg.bandWidth) / 2;
+    r.bandBlur = blurPx > 0 ? Sk.ImageFilter.MakeBlur(blurPx, blurPx, TILE_DECAL, null, null) : null;
+    r.haloBlur = blurPx > 0 ? Sk.ImageFilter.MakeBlur(blurPx * 3, blurPx * 3, TILE_DECAL, null, null) : null;
+
+    if (cfg.distortion > 0) {
+      const dd = cfg.distortionDetail / WARP_SPACE;
+      r.noise = Sk.ImageFilter.MakeShader(Sk.Shader.MakeFractalNoise(0.012 * dd, 0.05 * dd, 2, 7, 0, 0));
+      // Green pinned to 0.5 so only x displaces.
+      r.noiseColor = Sk.ColorFilter.MakeMatrix([1, 0, 0, 0, 0, 0, 0, 0, 0, 0.5, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0]);
+    } else {
+      r.noise = null;
+      r.noiseColor = null;
+    }
+  }
+
+  // The inner light's frame: fades in from every edge.
+  const fadePx = 28 * cfg.scale;
+  const vStop = Math.min(0.5, fadePx / ch);
+  r.frameV = Sk.Shader.MakeLinearGradient(
+    { x: 0, y: 0 },
+    { x: 0, y: ch },
+    [white(1), white(0), white(0), white(1)],
+    [0, vStop, Math.max(vStop, 1 - fadePx / ch), 1],
+    TILE_CLAMP
+  );
+  const hStop = Math.min(0.5, fadePx / cw);
+  r.frameH = Sk.Shader.MakeLinearGradient(
+    { x: 0, y: 0 },
+    { x: cw, y: 0 },
+    [white(1), white(0), white(0), white(1)],
+    [0, hStop, Math.max(hStop, 1 - fadePx / cw), 1],
+    TILE_CLAMP
+  );
+
+  // The faint inset rim (CSS `box-shadow: inset 0 0 9px 1px`): everything
+  // outside the box inset by 1px, blurred back in.
+  const R = paintedRadius(cfg.radius, cw, ch);
+  const blur = 9 * cfg.scale;
+  const rim = pathBuilder(Sk);
+  rim.addRect(rect(-blur * 3, -blur * 3, cw + blur * 6, ch + blur * 6));
+  rim.addRRect(rrect(1, 1, cw - 2, ch - 2, Math.max(0, R - 1)));
+  rim.setFillType(FILL_EVEN_ODD);
+  r.rim = finishPath(rim);
+
+  r.version = cfg.version;
+  r.w = cw;
+  r.h = ch;
+}
+
+// ── Drawing helpers ─────────────────────────────────────────────────────
 
 /** Erase the current layer within the current clip. (A paint, not drawColor: BlendMode.Clear is 0.) */
 function clearLayer(Sk: SkiaApi, canvas: SkCanvas): void {
@@ -182,112 +374,130 @@ function keepInside(Sk: SkiaApi, canvas: SkCanvas, path: SkPath): void {
   canvas.restore();
 }
 
-/** Multiply the current layer by a mask shader's alpha (CSS mask-image). */
-function applyMask(Sk: SkiaApi, canvas: SkCanvas, shader: SkShader, cw: number, ch: number): void {
+/**
+ * Fill with a unit-size radial gradient placed at (x, y) with radii (rx, ry),
+ * over only its visible extent (in unit radii) within the element.
+ */
+function drawUnit(
+  canvas: SkCanvas,
+  paint: SkPaint,
+  shader: SkShader | null,
+  x: number,
+  y: number,
+  rx: number,
+  ry: number,
+  extent: number,
+  cw: number,
+  ch: number
+): void {
   'worklet';
-  const p = Sk.Paint();
-  p.setBlendMode(BLEND_DST_IN);
-  p.setShader(shader);
-  canvas.drawRect(Sk.XYWHRect(0, 0, cw, ch), p);
+  if (!shader || rx < 0.01 || ry < 0.01) return;
+  const x0 = Math.max(-extent, -x / rx);
+  const x1 = Math.min(extent, (cw - x) / rx);
+  const y0 = Math.max(-extent, -y / ry);
+  const y1 = Math.min(extent, (ch - y) / ry);
+  if (x1 <= x0 || y1 <= y0) return;
+  paint.setShader(shader);
+  canvas.save();
+  canvas.translate(x, y);
+  canvas.scale(rx, ry);
+  canvas.drawRect(rect(x0, y0, x1 - x0, y1 - y0), paint);
+  canvas.restore();
 }
 
 /**
  * The ellipse every layer is masked to: on the beam, growing with the
- * level and humping up with the bend.
+ * level and humping up with the bend. Multiplies the current layer by it.
  */
-function edgeMask(
+function applyEdgeMask(
   Sk: SkiaApi,
+  canvas: SkCanvas,
+  shader: SkShader | null,
   cfg: GlowConfig,
   f: GlowFrame,
   cw: number,
   ch: number,
   w: number,
-  h: number,
-  mid: number,
-  tail: number
-): SkShader | null {
+  h: number
+): void {
   'worklet';
   const rx = px1(w * cfg.rangeWidth) * f.w * f.mw;
   const ry = px1(h * cfg.rangeHeight) * f.h + f.lift;
-  if (rx < 0.01 || ry < 0.01) return null;
+  if (!shader || rx < 0.01 || ry < 0.01) {
+    clearLayer(Sk, canvas);
+    return;
+  }
   const cx = cw / 2 + f.cx * f.w;
   const cy = ch + f.cy;
-  if (tail > 0) {
-    return ellipseShader(Sk, cx, cy, rx, ry, [white(1), white(0.5), white(tail), white(0)], [0, mid / 100, 0.85, 1]);
-  }
-  return ellipseShader(Sk, cx, cy, rx, ry, [white(1), white(0.5), white(0)], [0, mid / 100, 1]);
+  const p = Sk.Paint();
+  p.setBlendMode(BLEND_DST_IN);
+  p.setShader(shader);
+  canvas.save();
+  canvas.translate(cx, cy);
+  canvas.scale(rx, ry);
+  // A little past the element on every side, so its edge pixels are fully covered.
+  canvas.drawRect(rect((-cx - 2) / rx, (-cy - 2) / ry, (cw + 4) / rx, (ch + 4) / ry), p);
+  canvas.restore();
 }
 
 /**
- * The seven lobes as stacked radial gradients (the last lobe at the bottom
- * of the stack, as CSS paints a background list).
+ * The seven lobes of one layer as stacked radial gradients (the last lobe
+ * at the bottom of the stack, as CSS paints a background list).
  */
 function drawLobes(
   Sk: SkiaApi,
   canvas: SkCanvas,
-  cfg: GlowConfig,
+  res: GlowResources,
+  layer: number,
   f: GlowFrame,
   cw: number,
   ch: number,
-  alpha: number,
   sw: number,
   sh: number,
   y: number,
-  fade: number
+  stop: number
 ): void {
   'worklet';
-  const stop = fade / 100;
   const p = Sk.Paint();
   for (let i = LOBE_COUNT - 1; i >= 0; i--) {
     const W = Math.round(LOBE_W[i] * sw) * f.w;
     const H = Math.round(LOBE_H[i] * sh) * f.h * f.lobeL[i];
-    if (W < 0.01 || H < 0.01) continue;
     const X = cw / 2 + (f.cx + f.lobeX[i]) * f.w;
     const Y = ch + (y + f.lobeY[i]);
-    const c = cfg.colors[i];
-    p.setShader(ellipseShader(Sk, X, Y, W, H, [rgba(c, alpha), rgba(c, 0)], [0, stop]));
-    // Only the gradient's visible extent needs filling.
-    const ex = W * stop + 1;
-    const ey = H * stop + 1;
-    const x0 = Math.max(0, X - ex);
-    const y0 = Math.max(0, Y - ey);
-    const x1 = Math.min(cw, X + ex);
-    const y1 = Math.min(ch, Y + ey);
-    if (x1 > x0 && y1 > y0) canvas.drawRect(Sk.XYWHRect(x0, y0, x1 - x0, y1 - y0), p);
+    drawUnit(canvas, p, res.lobes[layer * LOBE_COUNT + i], X, Y, W, H, stop, cw, ch);
   }
 }
 
-/**
- * The displacement warp: drifting fractal noise displacing x only.
- *
- * The web component rasters its warp layers at half size and scales them
- * back up, and its SVG filter works in that half-size space, so on screen
- * the noise is twice as coarse and the displacement and drift twice as
- * large as the numbers say. That is the look people see, so it is the look
- * reproduced here, at full resolution.
- */
-const WARP_SPACE = 2;
-
-function displacementFilter(Sk: SkiaApi, cfg: GlowConfig, f: GlowFrame, input: SkImageFilter): SkImageFilter {
+/** This frame's displacement map: the cached noise, drifted. */
+function displacementMap(Sk: SkiaApi, res: GlowResources, f: GlowFrame): SkImageFilter | null {
   'worklet';
-  const dd = cfg.distortionDetail / WARP_SPACE;
-  const noise = Sk.Shader.MakeFractalNoise(0.012 * dd, 0.05 * dd, 2, 7, 0, 0);
-  let map = Sk.ImageFilter.MakeShader(noise);
-  map = Sk.ImageFilter.MakeOffset(f.noiseDx * WARP_SPACE, f.noiseDy * WARP_SPACE, map, null);
-  // Green pinned to 0.5 so only x displaces.
-  map = Sk.ImageFilter.MakeColorFilter(
-    Sk.ColorFilter.MakeMatrix([1, 0, 0, 0, 0, 0, 0, 0, 0, 0.5, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0]),
-    map,
+  if (!res.noise || !res.noiseColor) return null;
+  return Sk.ImageFilter.MakeColorFilter(
+    res.noiseColor,
+    Sk.ImageFilter.MakeOffset(f.noiseDx * WARP_SPACE, f.noiseDy * WARP_SPACE, res.noise, null),
     null
   );
+}
+
+function displace(Sk: SkiaApi, f: GlowFrame, map: SkImageFilter | null, input: SkImageFilter | null): SkImageFilter | null {
+  'worklet';
+  if (!map) return input;
   return Sk.ImageFilter.MakeDisplacementMap(CHANNEL_R, CHANNEL_G, f.displace * WARP_SPACE, map, input, null);
 }
 
 // ── Layers ──────────────────────────────────────────────────────────────
 
+interface Bounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 function paintInner(
   Sk: SkiaApi,
   canvas: SkCanvas,
+  res: GlowResources,
   cfg: GlowConfig,
   f: GlowFrame,
   cw: number,
@@ -295,7 +505,8 @@ function paintInner(
   R: number,
   colorFilter: SkColorFilter,
   clip: SkPath | null,
-  warped: boolean
+  warp: SkImageFilter | null,
+  bounds: Bounds
 ): void {
   'worklet';
   const opacity = Math.min(1, f.opacity * f.glow * cfg.innerOpacity * cfg.strength);
@@ -303,64 +514,48 @@ function paintInner(
 
   const layer = Sk.Paint();
   layer.setAlphaf(opacity);
-  canvas.saveLayer(layer);
+  canvas.saveLayer(layer, bounds);
 
   // Content, then the filter.
   const filterPaint = Sk.Paint();
-  const cf = Sk.ImageFilter.MakeColorFilter(colorFilter, null, null);
-  filterPaint.setImageFilter(warped ? displacementFilter(Sk, cfg, f, cf) : cf);
-  canvas.saveLayer(filterPaint);
-  canvas.clipRRect(rrect(Sk, 0, 0, cw, ch, R), CLIP_INTERSECT, true);
-  const gw = cfg.glowWidth * 0.9 * cfg.innerScale;
-  const gh = cfg.glowHeight * 0.9 * cfg.innerScale * cfg.innerHeight;
-  drawLobes(Sk, canvas, cfg, f, cw, ch, 0.46, gw, gh, 0, cfg.fade);
-  // The faint inset rim (CSS `box-shadow: inset 0 0 9px 1px`).
-  const blur = 9 * cfg.scale;
-  const sigma = blur / 2;
-  const rim = pathBuilder(Sk);
-  rim.addRect(Sk.XYWHRect(-blur * 3, -blur * 3, cw + blur * 6, ch + blur * 6));
-  rim.addRRect(rrect(Sk, 1, 1, cw - 2, ch - 2, Math.max(0, R - 1)));
-  rim.setFillType(FILL_EVEN_ODD);
-  const shadow = Sk.Paint();
-  const sc = cfg.innerShadow;
-  shadow.setColor(Float32Array.of(sc[0] / 255, sc[1] / 255, sc[2] / 255, sc[3]));
-  shadow.setMaskFilter(Sk.MaskFilter.MakeBlur(BLUR_NORMAL, sigma, true));
-  canvas.drawPath(finishPath(rim), shadow);
+  filterPaint.setColorFilter(colorFilter);
+  if (warp) filterPaint.setImageFilter(warp);
+  canvas.saveLayer(filterPaint, bounds);
+  canvas.clipRRect(rrect(0, 0, cw, ch, R), CLIP_INTERSECT, true);
+  drawLobes(
+    Sk,
+    canvas,
+    res,
+    LAYER_INNER,
+    f,
+    cw,
+    ch,
+    cfg.glowWidth * 0.9 * cfg.innerScale,
+    cfg.glowHeight * 0.9 * cfg.innerScale * cfg.innerHeight,
+    0,
+    cfg.fade / 100
+  );
+  if (res.rim) {
+    const shadow = Sk.Paint();
+    const sc = cfg.innerShadow;
+    shadow.setColor(Float32Array.of(sc[0] / 255, sc[1] / 255, sc[2] / 255, sc[3]));
+    shadow.setMaskFilter(Sk.MaskFilter.MakeBlur(BLUR_NORMAL, (9 * cfg.scale) / 2, true));
+    canvas.drawPath(res.rim, shadow);
+  }
   canvas.restore();
 
   // The clip, then the mask: the ceiling ellipse, intersected with a
   // frame that keeps the light near the edges.
   if (clip) keepInside(Sk, canvas, clip);
-  const mask = edgeMask(Sk, cfg, f, cw, ch, 170, 64, 45, 0.3);
-  if (mask) applyMask(Sk, canvas, mask, cw, ch);
-  else clearLayer(Sk, canvas);
-  const fadePx = 28 * cfg.scale;
+  applyEdgeMask(Sk, canvas, res.maskInner, cfg, f, cw, ch, 170, 64);
   const frame = Sk.Paint();
   frame.setBlendMode(BLEND_DST_IN);
-  canvas.saveLayer(frame);
+  canvas.saveLayer(frame, bounds);
   const g = Sk.Paint();
-  const vStop = Math.min(0.5, fadePx / ch);
-  g.setShader(
-    Sk.Shader.MakeLinearGradient(
-      { x: 0, y: 0 },
-      { x: 0, y: ch },
-      [white(1), white(0), white(0), white(1)],
-      [0, vStop, Math.max(vStop, 1 - fadePx / ch), 1],
-      TILE_CLAMP
-    )
-  );
-  canvas.drawRect(Sk.XYWHRect(0, 0, cw, ch), g);
-  const hStop = Math.min(0.5, fadePx / cw);
-  g.setShader(
-    Sk.Shader.MakeLinearGradient(
-      { x: 0, y: 0 },
-      { x: cw, y: 0 },
-      [white(1), white(0), white(0), white(1)],
-      [0, hStop, Math.max(hStop, 1 - fadePx / cw), 1],
-      TILE_CLAMP
-    )
-  );
-  canvas.drawRect(Sk.XYWHRect(0, 0, cw, ch), g);
+  g.setShader(res.frameV);
+  canvas.drawRect(rect(0, 0, cw, ch), g);
+  g.setShader(res.frameH);
+  canvas.drawRect(rect(0, 0, cw, ch), g);
   canvas.restore();
 
   canvas.restore();
@@ -369,69 +564,66 @@ function paintInner(
 function paintStroke(
   Sk: SkiaApi,
   canvas: SkCanvas,
+  res: GlowResources,
   cfg: GlowConfig,
   f: GlowFrame,
   cw: number,
   ch: number,
   R: number,
-  colorFilter: SkColorFilter
+  colorFilter: SkColorFilter,
+  bounds: Bounds
 ): void {
   'worklet';
   const opacity = Math.min(1, f.opacity * f.glow * cfg.strokeOpacity * cfg.strength);
   if (opacity <= 0.002) return;
   const layer = Sk.Paint();
   layer.setAlphaf(opacity);
-  canvas.saveLayer(layer);
+  canvas.saveLayer(layer, bounds);
 
   const filterPaint = Sk.Paint();
   filterPaint.setColorFilter(colorFilter);
-  canvas.saveLayer(filterPaint);
+  canvas.saveLayer(filterPaint, bounds);
   // The 1px ring between the border box and the content box.
   const innerR = Math.max(0, R - 1);
-  canvas.clipRRect(rrect(Sk, 0, 0, cw, ch, innerR), CLIP_INTERSECT, true);
-  canvas.clipRRect(rrect(Sk, 1, 1, cw - 2, ch - 2, Math.max(0, innerR - 1)), CLIP_DIFFERENCE, true);
-  drawLobes(Sk, canvas, cfg, f, cw, ch, 1, cfg.glowWidth * cfg.strokeScale, cfg.glowHeight * cfg.strokeScale, 2, cfg.fade);
+  canvas.clipRRect(rrect(0, 0, cw, ch, innerR), CLIP_INTERSECT, true);
+  canvas.clipRRect(rrect(1, 1, cw - 2, ch - 2, Math.max(0, innerR - 1)), CLIP_DIFFERENCE, true);
+  drawLobes(
+    Sk,
+    canvas,
+    res,
+    LAYER_STROKE,
+    f,
+    cw,
+    ch,
+    cfg.glowWidth * cfg.strokeScale,
+    cfg.glowHeight * cfg.strokeScale,
+    2,
+    cfg.fade / 100
+  );
   // The hot core at the centre of the edge: white on dark, black on light.
-  const bx = cw / 2 + f.cx * f.w;
-  const by = ch + 2 + f.cy;
   const cs = cfg.coreSize;
-  const p = Sk.Paint();
-  if (cfg.dark) {
-    const rx = px1(30 * cs) * f.w;
-    const ry = px1(30 * cs) * f.h;
-    if (rx > 0.01 && ry > 0.01) {
-      p.setShader(ellipseShader(Sk, bx, by, rx, ry, [white(0.45), white(0.14), white(0)], [0, 0.3, 0.65]));
-      canvas.drawRect(Sk.XYWHRect(0, 0, cw, ch), p);
-    }
-  } else {
-    const rx = px1(40 * cs) * f.w;
-    const ry = px1(30 * cs) * f.h;
-    if (rx > 0.01 && ry > 0.01) {
-      p.setShader(
-        ellipseShader(
-          Sk,
-          bx,
-          by,
-          rx,
-          ry,
-          [Float32Array.of(0, 0, 0, 0.55), Float32Array.of(0, 0, 0, 0.22), Float32Array.of(0, 0, 0, 0)],
-          [0, 0.35, 0.7]
-        )
-      );
-      canvas.drawRect(Sk.XYWHRect(0, 0, cw, ch), p);
-    }
-  }
+  drawUnit(
+    canvas,
+    Sk.Paint(),
+    res.highlight,
+    cw / 2 + f.cx * f.w,
+    ch + 2 + f.cy,
+    px1((cfg.dark ? 30 : 40) * cs) * f.w,
+    px1(30 * cs) * f.h,
+    cfg.dark ? 0.65 : 0.7,
+    cw,
+    ch
+  );
   canvas.restore();
 
-  const mask = edgeMask(Sk, cfg, f, cw, ch, 170, 64, 45, 0);
-  if (mask) applyMask(Sk, canvas, mask, cw, ch);
-  else clearLayer(Sk, canvas);
+  applyEdgeMask(Sk, canvas, res.maskStroke, cfg, f, cw, ch, 170, 64);
   canvas.restore();
 }
 
 function paintBloom(
   Sk: SkiaApi,
   canvas: SkCanvas,
+  res: GlowResources,
   cfg: GlowConfig,
   f: GlowFrame,
   cw: number,
@@ -439,62 +631,52 @@ function paintBloom(
   R: number,
   colorFilter: SkColorFilter,
   clip: SkPath | null,
-  warped: boolean
+  warp: SkImageFilter | null,
+  bounds: Bounds
 ): void {
   'worklet';
   const opacity = Math.min(1, f.opacity * f.glow * cfg.bloomOpacity * cfg.strength);
   if (opacity <= 0.002) return;
   const layer = Sk.Paint();
   layer.setAlphaf(opacity);
-  canvas.saveLayer(layer);
+  canvas.saveLayer(layer, bounds);
 
-  const blur = Sk.ImageFilter.MakeBlur(cfg.bloomBlur, cfg.bloomBlur, TILE_DECAL, null, null);
-  const colored = Sk.ImageFilter.MakeColorFilter(colorFilter, blur, null);
+  // Blur (then the displacement, if any), then the colour: a layer paint's
+  // colour filter applies to its image filter's output.
   const filterPaint = Sk.Paint();
-  filterPaint.setImageFilter(warped ? displacementFilter(Sk, cfg, f, colored) : colored);
-  canvas.saveLayer(filterPaint);
-  canvas.clipRRect(rrect(Sk, 0, 0, cw, ch, Math.max(0, R - 1)), CLIP_INTERSECT, true);
+  filterPaint.setImageFilter(warp ?? res.bloomBlur);
+  filterPaint.setColorFilter(colorFilter);
+  canvas.saveLayer(filterPaint, bounds);
+  canvas.clipRRect(rrect(0, 0, cw, ch, Math.max(0, R - 1)), CLIP_INTERSECT, true);
   drawLobes(
     Sk,
     canvas,
-    cfg,
+    res,
+    LAYER_BLOOM,
     f,
     cw,
     ch,
-    cfg.dark ? 0.9 : 0.7,
     cfg.glowWidth * 1.15 * cfg.bloomScale,
     cfg.glowHeight * 1.5 * cfg.bloomScale * cfg.bloomHeight,
     0,
-    Math.min(95, cfg.fade + 2)
+    Math.min(95, cfg.fade + 2) / 100
   );
   canvas.restore();
 
   if (clip) keepInside(Sk, canvas, clip);
-  const mask = edgeMask(Sk, cfg, f, cw, ch, 200, 130, 35, 0);
-  if (mask) applyMask(Sk, canvas, mask, cw, ch);
-  else clearLayer(Sk, canvas);
+  applyEdgeMask(Sk, canvas, res.maskBloom, cfg, f, cw, ch, 200, 130);
   canvas.restore();
-}
-
-/** A horizontal gradient that fades the band's ends into the edge. */
-function endsFaded(Sk: SkiaApi, x0: number, x1: number, c: RGB, a: number, fade: number): SkShader {
-  'worklet';
-  return Sk.Shader.MakeLinearGradient(
-    { x: x0, y: 0 },
-    { x: x1 === x0 ? x0 + 1 : x1, y: 0 },
-    [rgba(c, 0), rgba(c, a), rgba(c, a), rgba(c, 0)],
-    [0, fade, 1 - fade, 1],
-    TILE_CLAMP
-  );
 }
 
 function paintBand(
   Sk: SkiaApi,
   canvas: SkCanvas,
+  res: GlowResources,
   cfg: GlowConfig,
   f: GlowFrame,
   pts: number[],
-  colorFilter: SkColorFilter
+  colorFilter: SkColorFilter,
+  bounds: Bounds
 ): void {
   'worklet';
   const alpha = Math.min(1, 0.6 * cfg.bandStrength * f.bendA);
@@ -503,8 +685,8 @@ function paintBand(
 
   const layer = Sk.Paint();
   layer.setAlphaf(opacity);
-  layer.setImageFilter(Sk.ImageFilter.MakeColorFilter(colorFilter, null, null));
-  canvas.saveLayer(layer);
+  layer.setColorFilter(colorFilter);
+  canvas.saveLayer(layer, bounds);
 
   const bw = cfg.bandWidth * (1 + 0.35 * f.level);
   const split = cfg.bandAberration * (0.35 + 0.65 * f.level);
@@ -512,10 +694,6 @@ function paintBand(
   const dx = 4 * split * cfg.scale;
   const base = (cfg.dark ? 0.42 : 0.4) * alpha;
   const thickness = 14 * bw;
-  const blurPx = (3.5 * cfg.bandWidth) / 2;
-  const x0 = pts[0];
-  const x1 = pts[BAND_SAMPLES * 2];
-  const fade = cfg.bandTail > 0 ? 0.015 : 0.18;
 
   const p = Sk.Paint();
   p.setStyle(STYLE_STROKE);
@@ -523,15 +701,15 @@ function paintBand(
   p.setStrokeJoin(JOIN_ROUND);
 
   // Halo: wide and hazy, under everything.
-  p.setImageFilter(Sk.ImageFilter.MakeBlur(blurPx * 3, blurPx * 3, TILE_DECAL, null, null));
-  p.setShader(endsFaded(Sk, x0, x1, cfg.bandCore, base * 0.3, fade));
+  p.setImageFilter(res.haloBlur);
+  p.setColor(rgba(cfg.bandCore, base * 0.3));
   p.setStrokeWidth(thickness * 2.2);
   canvas.drawPath(linePath(Sk, pts, 0, 0), p);
 
   // The ridge: a red fringe above, a faint green between, blue below and
   // the core on top, each a stack of shrinking strokes so it has a ramp
   // across its thickness.
-  p.setImageFilter(Sk.ImageFilter.MakeBlur(blurPx, blurPx, TILE_DECAL, null, null));
+  p.setImageFilter(res.bandBlur);
   for (let r = 0; r < 4; r++) {
     const c = r === 0 ? cfg.bandAbove : r === 1 ? cfg.bandMid : r === 2 ? cfg.bandBelow : cfg.bandCore;
     const a = r === 1 ? 0.55 : r === 3 ? 0.9 : 1;
@@ -539,10 +717,25 @@ function paintBand(
     const oy = r === 0 ? -dy : r === 1 ? -dy * 0.35 : r === 2 ? dy : 0;
     const path = linePath(Sk, pts, ox, oy);
     for (let k = 0; k < 4; k++) {
-      p.setShader(endsFaded(Sk, x0, x1, c, base * a * BAND_RAMP_A[k], fade));
+      p.setColor(rgba(c, base * a * BAND_RAMP_A[k]));
       p.setStrokeWidth(Math.max(0.6, thickness * BAND_RAMP_W[k]));
       canvas.drawPath(path, p);
     }
+  }
+
+  // Fade the ends into the edge so the band never stops in a stub: the
+  // cached unit-width fade, stretched over this frame's span.
+  const x0 = pts[0];
+  const span = Math.max(1, pts[BAND_SAMPLES * 2] - x0);
+  if (res.bandFade) {
+    const m = Sk.Paint();
+    m.setBlendMode(BLEND_DST_IN);
+    m.setShader(res.bandFade);
+    canvas.save();
+    canvas.translate(x0, 0);
+    canvas.scale(span, 1);
+    canvas.drawRect(rect((bounds.x - 2 - x0) / span, bounds.y - 2, (bounds.width + 4) / span, bounds.height + 4), m);
+    canvas.restore();
   }
   canvas.restore();
 }
@@ -550,54 +743,62 @@ function paintBand(
 function paintCore(
   Sk: SkiaApi,
   canvas: SkCanvas,
+  res: GlowResources,
   cfg: GlowConfig,
   f: GlowFrame,
   cw: number,
   ch: number,
   R: number,
-  below: SkPath | null
+  below: SkPath | null,
+  bounds: Bounds
 ): void {
   'worklet';
+  if (!res.core) return;
   const boost = Math.max(0, Math.min(2, cfg.coreLight - 1));
-  const b1 = Math.min(1, boost);
-  const b2 = Math.max(0, boost - 1);
   const grow = 1 + 0.3 * boost;
-  const solid = px1(45 * b1 + 27 * b2) / 100;
-  const midStop = px1(40 + 25 * b1 + 15 * b2) / 100;
-  const midAlpha = Math.min(1, 0.55 + 0.35 * b1 + 0.1 * b2);
-  const endStop = px1(72 + 14 * b1 + 8 * b2) / 100;
   const opacity = f.opacity * Math.min(1, f.glow * Math.min(1, cfg.coreLight) * (1.6 + 1.4 * boost));
   if (opacity <= 0.002) return;
-
   const rx = px1(120 * cfg.coreLightWidth * grow * cfg.scale) * f.w;
   const ry = px1(70 * cfg.coreLightHeight * grow * cfg.scale) * f.h + f.lift;
-  if (rx < 0.01 || ry < 0.01) return;
 
   const layer = Sk.Paint();
   layer.setAlphaf(opacity);
-  layer.setImageFilter(Sk.ImageFilter.MakeBlur(cfg.coreBlur, cfg.coreBlur, TILE_DECAL, null, null));
-  canvas.saveLayer(layer);
-  canvas.clipRRect(rrect(Sk, 0, 0, cw, ch, Math.max(0, R - 1)), CLIP_INTERSECT, true);
+  layer.setImageFilter(res.coreBlur);
+  canvas.saveLayer(layer, bounds);
+  canvas.clipRRect(rrect(0, 0, cw, ch, Math.max(0, R - 1)), CLIP_INTERSECT, true);
   if (below) canvas.clipPath(below, CLIP_INTERSECT, true);
-  const p = Sk.Paint();
-  p.setShader(
-    ellipseShader(
-      Sk,
-      cw / 2 + f.cx * f.w,
-      ch + f.cy,
-      rx,
-      ry,
-      [white(1), white(1), white(midAlpha), white(0)],
-      [0, solid, midStop, endStop]
-    )
-  );
-  canvas.drawRect(Sk.XYWHRect(0, 0, cw, ch), p);
+  drawUnit(canvas, Sk.Paint(), res.core, cw / 2 + f.cx * f.w, ch + f.cy, rx, ry, res.coreExtent, cw, ch);
   canvas.restore();
 }
 
 /**
+ * The top of the region the glow can reach this frame, so every offscreen
+ * layer is only as tall as the glow (a quiet glow on a phone screen is a
+ * fraction of it).
+ */
+function glowTop(cfg: GlowConfig, f: GlowFrame, ch: number, pts: number[]): number {
+  'worklet';
+  // The bloom's ceiling is the tallest of the masks; nothing it masks reaches higher.
+  let top = ch + f.cy - (px1(130 * cfg.rangeHeight) * f.h + f.lift);
+  // The band and its blurred halo.
+  let minY = ch;
+  for (let i = 0; i <= BAND_SAMPLES; i++) if (pts[i * 2 + 1] < minY) minY = pts[i * 2 + 1];
+  const thickness = 14 * cfg.bandWidth * (1 + 0.35 * f.level);
+  const dy = (4 + 12 * cfg.bandAberration) * cfg.scale;
+  const blurPx = (3.5 * cfg.bandWidth) / 2;
+  top = Math.min(top, minY - dy - thickness * 1.1 - blurPx * 9);
+  // The epicentre and its blur.
+  if (cfg.coreLight > 0) {
+    const grow = 1 + 0.3 * Math.max(0, Math.min(2, cfg.coreLight - 1));
+    top = Math.min(top, ch + f.cy - (px1(70 * cfg.coreLightHeight * grow * cfg.scale) * f.h + f.lift) - cfg.coreBlur * 3);
+  }
+  return Math.max(0, Math.floor(top - 4));
+}
+
+/**
  * Paint the whole glow for one frame. `scratch` holds the band line's
- * points between frames (2 × (BAND_SAMPLES + 1) numbers).
+ * points between frames (2 × (BAND_SAMPLES + 1) numbers); `res` holds the
+ * cached shaders and filters.
  */
 export function paintGlow(
   Sk: SkiaApi,
@@ -606,28 +807,41 @@ export function paintGlow(
   f: GlowFrame,
   cw: number,
   ch: number,
-  scratch: number[]
+  scratch: number[],
+  res: GlowResources
 ): void {
   'worklet';
   if (cw <= 0 || ch <= 0 || f.opacity <= 0.001) return;
+  prepareResources(Sk, res, cfg, cw, ch);
   const R = paintedRadius(cfg.radius, cw, ch);
 
   canvas.save();
-  canvas.clipRRect(rrect(Sk, 0, 0, cw, ch, R), CLIP_INTERSECT, true);
+  canvas.clipRRect(rrect(0, 0, cw, ch, R), CLIP_INTERSECT, true);
 
-  const colorFilter = cssColorFilter(Sk, cfg.hueBase + f.hue, cfg.brightness, cfg.saturation);
+  const hue = cfg.hueBase + f.hue;
+  if (res.colorVersion !== cfg.version || Math.abs(res.colorHue - hue) > 0.01 || !res.colorFilter) {
+    res.colorFilter = cssColorFilter(Sk, hue, cfg.brightness, cfg.saturation);
+    res.colorHue = hue;
+    res.colorVersion = cfg.version;
+  }
+  const colorFilter = res.colorFilter;
+
   bandPoints(cfg, f, cw, ch, scratch);
+  const top = glowTop(cfg, f, ch, scratch);
+  const bounds = rect(0, top, cw, ch - top);
   const warp = cfg.distortion > 0 && !f.warpOff && f.displace > 0.01;
   const above = warp ? abovePath(Sk, scratch, cw, ch) : null;
   const below = warp || cfg.coreLight > 0 ? belowPath(Sk, scratch, cw, ch) : null;
 
-  paintInner(Sk, canvas, cfg, f, cw, ch, R, colorFilter, above, false);
-  if (warp) paintInner(Sk, canvas, cfg, f, cw, ch, R, colorFilter, below, true);
-  paintStroke(Sk, canvas, cfg, f, cw, ch, R, colorFilter);
-  paintBloom(Sk, canvas, cfg, f, cw, ch, R, colorFilter, above, false);
-  if (warp) paintBloom(Sk, canvas, cfg, f, cw, ch, R, colorFilter, below, true);
-  paintBand(Sk, canvas, cfg, f, scratch, colorFilter);
-  if (cfg.coreLight > 0) paintCore(Sk, canvas, cfg, f, cw, ch, R, below);
+  const map = warp ? displacementMap(Sk, res, f) : null;
+
+  paintInner(Sk, canvas, res, cfg, f, cw, ch, R, colorFilter, above, null, bounds);
+  if (warp) paintInner(Sk, canvas, res, cfg, f, cw, ch, R, colorFilter, below, displace(Sk, f, map, null), bounds);
+  paintStroke(Sk, canvas, res, cfg, f, cw, ch, R, colorFilter, bounds);
+  paintBloom(Sk, canvas, res, cfg, f, cw, ch, R, colorFilter, above, null, bounds);
+  if (warp) paintBloom(Sk, canvas, res, cfg, f, cw, ch, R, colorFilter, below, displace(Sk, f, map, res.bloomBlur), bounds);
+  paintBand(Sk, canvas, res, cfg, f, scratch, colorFilter, bounds);
+  if (cfg.coreLight > 0) paintCore(Sk, canvas, res, cfg, f, cw, ch, R, below, bounds);
 
   canvas.restore();
 }

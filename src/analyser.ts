@@ -104,16 +104,13 @@ export class VoiceAnalyser {
 
   /**
    * Feed mono PCM samples (-1…1). Runs an analysis every 1/rate seconds of
-   * audio and returns the mean of the analyses this buffer completed, or
-   * null if it completed none (a buffer shorter than one hop).
+   * audio and returns the analyses this buffer completed, oldest first
+   * (none for a buffer shorter than one hop). A 100 ms buffer yields six,
+   * which the glow plays back one per frame.
    */
-  process(samples: Float32Array, sampleRate: number): VoiceAnalysis | null {
+  process(samples: Float32Array, sampleRate: number): VoiceAnalysis[] {
     const hop = Math.max(1, Math.round(sampleRate / this.rate));
-    let count = 0;
-    let sumSq = 0;
-    let low = 0;
-    let mid = 0;
-    let high = 0;
+    const out: VoiceAnalysis[] = [];
     for (let i = 0; i < samples.length; i++) {
       this.ring[this.writeAt] = samples[i];
       this.writeAt = (this.writeAt + 1) % this.fftSize;
@@ -121,16 +118,10 @@ export class VoiceAnalyser {
       this.sinceAnalysis++;
       if (this.sinceAnalysis >= hop) {
         this.sinceAnalysis = 0;
-        const r = this.analyse(sampleRate);
-        sumSq += r.rms * r.rms;
-        low += r.low;
-        mid += r.mid;
-        high += r.high;
-        count++;
+        out.push(this.analyse(sampleRate));
       }
     }
-    if (count === 0) return null;
-    return { rms: Math.sqrt(sumSq / count), low: low / count, mid: mid / count, high: high / count };
+    return out;
   }
 
   /** One analysis of the latest fftSize samples (the AnalyserNode's getFloatTimeDomainData + getByteFrequencyData). */

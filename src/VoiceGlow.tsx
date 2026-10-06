@@ -20,7 +20,7 @@ import {
 import { resolveGlowConfig } from './config';
 import { BAND_SAMPLES, createEngineState, createFrame, stepGlow } from './engine';
 import { useReduceMotionSetting, useResolvedTheme } from './hooks';
-import { paintGlow } from './painter';
+import { createResources, paintGlow, type GlowResources } from './painter';
 import type { GlowConfig, VoiceGlowMotion, VoiceGlowProps, VoiceInputFrame } from './types';
 
 const DEFAULT_RADIUS = 16;
@@ -160,6 +160,11 @@ export function VoiceGlow(props: VoiceGlowProps) {
   const engine = useSharedValue(createEngineState());
   const frame = useSharedValue(createFrame());
   const scratch = useSharedValue<number[]>(new Array((BAND_SAMPLES + 1) * 2).fill(0));
+  // Cached shaders, filters and the picture recorder, built on the UI thread.
+  const resources = useSharedValue<{ glow: GlowResources | null; recorder: ReturnType<typeof Skia.PictureRecorder> | null }>({
+    glow: null,
+    recorder: null,
+  });
   const picture = useSharedValue<SkPicture>(useMemo(emptyPicture, []));
 
   // ── Callbacks back to the JS thread ───────────────────────────────────
@@ -183,17 +188,18 @@ export function VoiceGlow(props: VoiceGlowProps) {
       'worklet';
       const s = engine.value;
       const c = cfg.value;
+      const { w, h } = size.value;
       s.sincePaint += (info.timeSincePreviousFrame ?? 16.7) / 1000;
-      // A paused glow repaints only when a prop changes.
-      if (c.paused && s.paintedVersion === c.version) {
+      const unchanged = s.paintedVersion === c.version && s.paintedW === w && s.paintedH === h;
+      // A paused glow repaints only when a prop or its size changes.
+      if (c.paused && unchanged) {
         s.sincePaint = 0;
         return;
       }
-      if (s.sincePaint < MIN_FRAME_INTERVAL && s.paintedVersion === c.version) return;
+      if (s.sincePaint < MIN_FRAME_INTERVAL && unchanged) return;
       const dt = s.sincePaint;
       s.sincePaint = 0;
 
-      const { w, h } = size.value;
       const f = frame.value;
       const reading: VoiceInputFrame = input
         ? input.value
@@ -204,14 +210,18 @@ export function VoiceGlow(props: VoiceGlowProps) {
       if (event !== 0) runOnJS(handleFadeEvent)(event);
 
       if (w > 0 && h > 0) {
-        const recorder = Skia.PictureRecorder();
-        const canvas = recorder.beginRecording(Skia.XYWHRect(0, 0, w, h));
-        paintGlow(Skia, canvas, c, f, w, h, scratch.value);
-        picture.value = recorder.finishRecordingAsPicture();
+        const r = resources.value;
+        if (!r.glow) r.glow = createResources();
+        if (!r.recorder) r.recorder = Skia.PictureRecorder();
+        const canvas = r.recorder.beginRecording({ x: 0, y: 0, width: w, height: h });
+        paintGlow(Skia, canvas, c, f, w, h, scratch.value, r.glow);
+        picture.value = r.recorder.finishRecordingAsPicture();
       }
       s.paintedVersion = c.version;
+      s.paintedW = w;
+      s.paintedH = h;
     },
-    [engine, cfg, size, frame, input, levelSource, motionSource, levelOut, wantsLevel, reportLevel, handleFadeEvent, scratch, picture]
+    [engine, cfg, size, frame, input, levelSource, motionSource, levelOut, wantsLevel, reportLevel, handleFadeEvent, scratch, resources, picture]
   );
 
   const loop = useFrameCallback(onFrame, true);
@@ -226,13 +236,12 @@ export function VoiceGlow(props: VoiceGlowProps) {
   }, [loop, running]);
 
   return (
-    <View
-      {...viewProps}
-      style={[styles.wrapper, { borderRadius: radius }, style]}
-      onLayout={handleLayout}
-    >
+    <View {...viewProps} style={style} onLayout={handleLayout}>
       {children}
       <Canvas
+        // sRGB, as the web renders it: the colour matrices and the
+        // displacement would otherwise run on Display P3 values on iOS.
+        colorSpace="srgb"
         style={styles.overlay}
         pointerEvents="none"
         accessible={false}
@@ -248,10 +257,9 @@ export function VoiceGlow(props: VoiceGlowProps) {
 /** Same component, under the web library's name. */
 export const VoiceBeam = VoiceGlow;
 
+// The glow clips itself to the host's rounded rectangle, so the wrapper
+// needs no overflow clipping (which would cost an offscreen pass on iOS).
 const styles = StyleSheet.create({
-  wrapper: {
-    overflow: 'hidden',
-  },
   overlay: {
     position: 'absolute',
     left: 0,

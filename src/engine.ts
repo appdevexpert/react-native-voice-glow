@@ -44,8 +44,14 @@ export interface EngineState {
   fadeT: number;
   fadeDur: number;
   fadeNotified: boolean;
+  /** The batch of readings being played back, and how far into it. */
+  inSeq: number;
+  inT: number;
   /** Frame pacing: seconds since the last painted frame. */
   sincePaint: number;
+  /** The size last painted, so a paused glow repaints after a resize. */
+  paintedW: number;
+  paintedH: number;
   /** The config version last painted, so a paused glow repaints only when a prop changes. */
   paintedVersion: number;
 }
@@ -104,8 +110,12 @@ export function createEngineState(): EngineState {
     fadeT: 0,
     fadeDur: 0,
     fadeNotified: true,
+    inSeq: -1,
+    inT: 0,
     sincePaint: 1,
     paintedVersion: -1,
+    paintedW: 0,
+    paintedH: 0,
   };
 }
 
@@ -253,6 +263,11 @@ export function stepGlow(
 
   // ── Fade in / out ───────────────────────────────────────────────────
   const fadeTarget = cfg.active ? 1 : 0;
+  if (s.fadeTo === -1 && fadeTarget === 0) {
+    // Mounted switched off: stay invisible without reporting a fade-out.
+    s.fadeTo = 0;
+    s.opacity = 0;
+  }
   if (fadeTarget !== s.fadeTo) {
     s.fadeFrom = s.opacity;
     s.fadeTo = fadeTarget;
@@ -275,10 +290,29 @@ export function stepGlow(
     const kind = input ? input.kind : 0;
     const value = input ? input.level : 0;
     if (kind === 2 && input) {
-      s.raw = value * BASE_GAIN * cfg.sensitivity;
-      s.r0 = input.low * BAND_GAIN * cfg.sensitivity;
-      s.r1 = input.mid * BAND_GAIN * cfg.sensitivity;
-      s.r2 = input.high * BAND_GAIN * cfg.sensitivity;
+      let level = value;
+      let low = input.low;
+      let mid = input.mid;
+      let high = input.high;
+      const readings = input.readings;
+      if (readings && readings.length >= 4) {
+        // Play a batch of readings back at the rate they were analysed.
+        if (input.seq !== s.inSeq) {
+          s.inSeq = input.seq ?? -1;
+          s.inT = 0;
+        } else {
+          s.inT += dt;
+        }
+        const k = Math.min(readings.length / 4 - 1, Math.floor(s.inT * 60)) * 4;
+        level = readings[k];
+        low = readings[k + 1];
+        mid = readings[k + 2];
+        high = readings[k + 3];
+      }
+      s.raw = level * BASE_GAIN * cfg.sensitivity;
+      s.r0 = low * BAND_GAIN * cfg.sensitivity;
+      s.r1 = mid * BAND_GAIN * cfg.sensitivity;
+      s.r2 = high * BAND_GAIN * cfg.sensitivity;
     } else {
       // No spectrum to read, so give the bands a little independent life:
       // slow, out-of-phase wobbles scaled by the level.

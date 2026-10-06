@@ -130,9 +130,60 @@ test('analyser: a 1 kHz tone lands in the mid band, a 150 Hz tone in the low ban
     for (let i = 0; i < x.length; i++) x[i] = 0.3 * Math.sin((2 * Math.PI * hz * i) / 48000);
     return x;
   };
-  const mid = new VoiceAnalyser().process(tone(1000), 48000);
+  const mid = new VoiceAnalyser().process(tone(1000), 48000).at(-1);
   assert.ok(mid.mid > mid.low && mid.mid > mid.high);
   assert.ok(Math.abs(mid.rms - 0.3 / Math.SQRT2) < 0.01);
-  const low = new VoiceAnalyser().process(tone(150), 48000);
+  const low = new VoiceAnalyser().process(tone(150), 48000).at(-1);
   assert.ok(low.low > low.mid && low.low > low.high);
+});
+
+test('painter: after the first frame, only the distortion map is rebuilt', () => {
+  // react-native-skia reports each shader and image filter to the JS engine
+  // as 1 MB, so per-frame allocation is what the UI thread's GC pays for.
+  const counts = { shader: 0, filter: 0 };
+  const count = (obj, key) =>
+    new Proxy(obj, {
+      get(t, k) {
+        const v = t[k];
+        return typeof v === 'function' && String(k).startsWith('Make')
+          ? (...a) => {
+              counts[key]++;
+              return v.apply(t, a);
+            }
+          : v;
+      },
+    });
+  const S = { ...Skia, Shader: count(Skia.Shader, 'shader'), ImageFilter: count(Skia.ImageFilter, 'filter') };
+  const cfg = cfgFor({});
+  const s = createEngineState();
+  const f = createFrame();
+  const res = glow.createResources();
+  const scratch = new Array(114).fill(0);
+  const surface = Skia.Surface.Make(360, 96);
+  for (let n = 0; n < 5; n++) {
+    for (let i = 0; i < 12; i++) stepGlow(s, f, cfg, { kind: 0, level: 0.3 + 0.1 * n, low: 0, mid: 0, high: 0 }, null, 1 / 60, 360, 96);
+    counts.shader = 0;
+    counts.filter = 0;
+    glow.paintGlow(S, surface.getCanvas(), cfg, f, 360, 96, scratch, res);
+  }
+  assert.equal(counts.shader, 0);
+  assert.ok(counts.filter <= 4, `${counts.filter} image filters in one frame`);
+});
+
+
+test('engine: a batch of readings plays back one per frame', () => {
+  const cfg = cfgFor({ sensitivity: 1 });
+  const s = createEngineState();
+  const f = createFrame();
+  const levels = [0.01, 0.02, 0.03, 0.04, 0.05, 0.06];
+  const readings = levels.flatMap((l) => [l, 0, 0, 0]);
+  const input = { kind: 2, level: 0.06, low: 0, mid: 0, high: 0, readings, seq: 1 };
+  const seen = [];
+  for (let i = 0; i < 8; i++) {
+    stepGlow(s, f, cfg, input, null, 1 / 60, 360, 96);
+    seen.push(+(s.raw / 5).toFixed(3));
+  }
+  assert.deepEqual(seen, [0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.06, 0.06]);
+  stepGlow(s, f, cfg, { ...input, readings: [0.5, 0, 0, 0], seq: 2 }, null, 1 / 60, 360, 96);
+  assert.equal(+(s.raw / 5).toFixed(3), 0.5);
 });
