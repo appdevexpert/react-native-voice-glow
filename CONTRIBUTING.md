@@ -14,13 +14,10 @@ Please leave the version in `package.json` alone in your pull request; the maint
 
 ## Releasing (maintainers)
 
-Every push to `main` runs `.github/workflows/publish.yml`. It publishes to npm only when the version in `package.json` is not on npm yet, so merging a pull request on its own does not release anything.
+Releases happen on GitHub; nothing is run locally.
 
-To release what is on `main`:
+- **Merging a pull request into `main` releases the next patch version** (0.1.0 → 0.1.1). Before merging, add the label `release:minor` or `release:major` for a bigger bump, or `skip-release` to merge without releasing (for example a README-only change).
+- **To release on demand**, open Actions → Release → Run workflow, pick patch, minor or major, and run it. Tick "Dry run" to run the checks and build without publishing.
+- To release an exact version, edit the `version` in `package.json` on GitHub and commit it to `main`, then use Run workflow. A version in `package.json` that is newer than npm is released as is.
 
-```sh
-npm version patch   # or minor / major; commits the bump and tags it
-git push --follow-tags
-```
-
-The workflow then runs the checks, publishes the new version to npm (with provenance, through npm trusted publishing, no token stored), and creates a GitHub release with notes generated from the merged pull requests. A pre-release version such as `0.2.0-beta.1` is published under the `next` tag instead of `latest`.
+Each release (`.github/workflows/publish.yml`) runs the checks, publishes to npm with provenance through npm trusted publishing (no npm token is stored), commits the new version back to `main`, tags it `vX.Y.Z` and creates a GitHub release with notes generated from the merged pull requests. If a release fails, nothing is committed; fix the cause and use Run workflow.

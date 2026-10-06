@@ -1,32 +1,60 @@
-name: Publish
+name: Release
 
-# Runs on every push to main (including merged pull requests). It publishes
-# only when the version in package.json is not on npm yet, so a merge that
-# does not bump the version just runs the checks. npm never accepts the same
-# version twice.
+# Releases a new version to npm entirely from GitHub.
 #
-# Auth is npm trusted publishing (OIDC): no npm token is stored in GitHub.
-# The package's trusted publisher on npmjs.com must name this file
-# (publish.yml) and allow `npm publish`.
+# - Merging a pull request into main releases the next patch version.
+#   Label the pull request "release:minor" or "release:major" for a bigger
+#   bump, or "skip-release" to merge it without releasing.
+# - Actions > Release > Run workflow releases on demand, with a choice of
+#   patch, minor or major (and a dry run that publishes nothing).
+#
+# Each release runs the checks, bumps the version, publishes to npm through
+# trusted publishing (no npm token is stored anywhere), commits the new
+# version to main, tags it and creates a GitHub release with notes.
+#
+# If package.json on main already holds a newer version than npm (someone
+# set it by hand), that exact version is released instead of a bump.
+#
+# pull_request_target runs this file as it is on main, so a pull request
+# cannot change what the release does, and the job only runs after the
+# merge, building the reviewed code on main.
 
 on:
-  push:
+  pull_request_target:
+    types: [closed]
     branches: [main]
   workflow_dispatch:
+    inputs:
+      bump:
+        description: Version bump
+        type: choice
+        options: [patch, minor, major]
+        default: patch
+      dry_run:
+        description: Dry run (run the checks and build, publish nothing)
+        type: boolean
+        default: false
 
 concurrency:
-  group: publish
+  group: release
   cancel-in-progress: false
 
 permissions:
-  contents: write # create the GitHub release for the new version
+  contents: write # commit the version, tag it, create the GitHub release
   id-token: write # npm trusted publishing
 
 jobs:
-  publish:
+  release:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.merged == true &&
+       !contains(github.event.pull_request.labels.*.name, 'skip-release'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: main
+          fetch-depth: 0
 
       - uses: actions/setup-node@v6
         with:
@@ -34,42 +62,63 @@ jobs:
           registry-url: https://registry.npmjs.org
           package-manager-cache: false
 
-      - name: Check whether this version is already on npm
-        id: check
-        run: |
-          NAME=$(node -p "require('./package.json').name")
-          VERSION=$(node -p "require('./package.json').version")
-          PUBLISHED=$(npm view "$NAME@$VERSION" version 2>/dev/null || true)
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          if [ "$PUBLISHED" = "$VERSION" ]; then
-            echo "publish=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::$NAME@$VERSION is already on npm. Bump the version in package.json to release."
-          else
-            echo "publish=true" >> "$GITHUB_OUTPUT"
-            # Pre-releases (1.2.0-beta.1) go to the "next" tag, not "latest".
-            case "$VERSION" in *-*) echo "tag=next" >> "$GITHUB_OUTPUT" ;; *) echo "tag=latest" >> "$GITHUB_OUTPUT" ;; esac
-          fi
-
-      - if: steps.check.outputs.publish == 'true'
-        run: npm ci --ignore-scripts
-
-      - if: steps.check.outputs.publish == 'true'
-        run: npm run typecheck && npm test && npm run build
-
       - name: Use npm 11 (trusted publishing needs 11.5.1 or later)
-        if: steps.check.outputs.publish == 'true'
         run: npm install -g npm@11 && npm --version
 
-      - name: Publish to npm
-        if: steps.check.outputs.publish == 'true'
-        run: npm publish --access public --tag ${{ steps.check.outputs.tag }}
+      - run: npm ci --ignore-scripts
 
-      - name: Create the GitHub release
-        if: steps.check.outputs.publish == 'true'
+      - name: Check
+        run: npm run typecheck && npm test && npm run build
+
+      - name: Pick the next version
+        id: version
+        env:
+          INPUT_BUMP: ${{ inputs.bump }}
+          LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then BUMP="$INPUT_BUMP"
+          elif echo "$LABELS" | grep -q '"release:major"'; then BUMP=major
+          elif echo "$LABELS" | grep -q '"release:minor"'; then BUMP=minor
+          else BUMP=patch; fi
+
+          NAME=$(node -p "require('./package.json').name")
+          CURRENT=$(node -p "require('./package.json').version")
+          LATEST=$(npm view "$NAME" version 2>/dev/null || true)
+          newer() { node -e '
+            const p = (v) => v.split("-")[0].split(".").map(Number);
+            const [a, b] = [p(process.argv[1]), p(process.argv[2])];
+            for (let i = 0; i < 3; i++) if (a[i] !== b[i]) process.exit(a[i] > b[i] ? 0 : 1);
+            process.exit(1);' "$1" "$2"; }
+
+          if [ -z "$LATEST" ] || newer "$CURRENT" "$LATEST"; then
+            BUMP="none, version set in package.json"
+          else
+            npm version "$LATEST" --no-git-tag-version --allow-same-version > /dev/null
+            npm version "$BUMP" --no-git-tag-version > /dev/null
+          fi
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "::notice::Releasing $NAME@$VERSION (npm had ${LATEST:-none}, bump: $BUMP)"
+
+      - name: Publish to npm
+        if: ${{ !inputs.dry_run }}
+        run: npm publish --access public
+
+      - name: Dry run of the publish
+        if: ${{ inputs.dry_run }}
+        run: npm publish --access public --dry-run
+
+      - name: Commit the version, tag it and create the GitHub release
+        if: ${{ !inputs.dry_run }}
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ steps.check.outputs.version }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          FLAGS=""
-          case "$VERSION" in *-*) FLAGS="--prerelease" ;; esac
-          gh release create "v$VERSION" --target "$GITHUB_SHA" --title "v$VERSION" --generate-notes $FLAGS
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package.json package-lock.json
+          git diff --cached --quiet || git commit -m "Release v$VERSION"
+          git pull --rebase origin main
+          git tag "v$VERSION"
+          git push origin HEAD:main "v$VERSION"
+          gh release create "v$VERSION" --title "v$VERSION" --generate-notes --verify-tag
