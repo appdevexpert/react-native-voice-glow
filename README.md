@@ -29,6 +29,8 @@ Add the microphone permission text to `app.json`:
 }
 ```
 
+Until the first npm release, install it from GitHub instead: `npm install github:appdevexpert/react-native-voice-glow`.
+
 Bare React Native: install `@shopify/react-native-skia` and `react-native-reanimated` as their docs describe, then `react-native-voice-glow`, and either `expo-audio` or [`react-native-audio-api`](https://docs.swmansion.com/react-native-audio-api/) for the microphone.
 
 ## Quick start

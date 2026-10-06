@@ -2,6 +2,14 @@
   "name": "react-native-voice-glow",
   "version": "0.1.0",
   "description": "Sound-reactive glow for React Native and Expo: a colorful beam along the bottom edge of a chat input or phone screen that rises and blooms with a voice. Skia + Reanimated, runs on the UI thread.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/appdevexpert/react-native-voice-glow.git"
+  },
+  "homepage": "https://github.com/appdevexpert/react-native-voice-glow#readme",
+  "bugs": {
+    "url": "https://github.com/appdevexpert/react-native-voice-glow/issues"
+  },
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
   "react-native": "src/index.ts",
@@ -38,7 +46,8 @@
     "typecheck": "tsc --noEmit",
     "test": "node --test test/glow.test.mjs",
     "render": "node scripts/render.mjs",
-    "prepack": "npm run build"
+    "prepack": "npm run build",
+    "prepare": "tsc -p tsconfig.build.json"
   },
   "peerDependencies": {
     "@shopify/react-native-skia": ">=2.0.0",
