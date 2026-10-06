@@ -4,7 +4,7 @@ A sound-reactive glow for React Native and Expo. A colourful beam rises from the
 
 <p>
   <img src="https://raw.githubusercontent.com/appdevexpert/react-native-voice-glow/main/docs/chat.webp" width="360" alt="The glow along the bottom of a chat input, rising and falling with a voice" />
-</p>
+</p> 
 <p>
   <img src="https://raw.githubusercontent.com/appdevexpert/react-native-voice-glow/main/docs/phone.webp" width="300" alt="The glow filling the bottom of a phone screen as someone speaks" />
 </p>
