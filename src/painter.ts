@@ -828,7 +828,8 @@ export function paintGlow(
 
   bandPoints(cfg, f, cw, ch, scratch);
   const top = glowTop(cfg, f, ch, scratch);
-  const bounds = rect(0, top, cw, ch - top);
+  // const bounds = rect(0, top, cw, ch - top);
+  const bounds = Sk.XYWHRect(0, top, cw, ch - top);
   const warp = cfg.distortion > 0 && !f.warpOff && f.displace > 0.01;
   const above = warp ? abovePath(Sk, scratch, cw, ch) : null;
   const below = warp || cfg.coreLight > 0 ? belowPath(Sk, scratch, cw, ch) : null;
